@@ -108,7 +108,8 @@ class InvASNetAudioPairDataset(Dataset):
             if T < target_len:
                 wav = torch.nn.functional.pad(wav, (0, target_len - T))
             else:
-                wav = wav[:, :target_len]
+                start = torch.randint(0, T - target_len + 1, (1,)).item()
+                wav = wav[:, start:start + target_len]
             return wav
 
         # 在 __getitem__(self, idx) 裡用：
@@ -145,4 +146,5 @@ testloader = DataLoader(
     num_workers=0,
     drop_last=True
 )
+
 
