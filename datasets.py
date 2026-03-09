@@ -6,11 +6,11 @@ import config as c
 import torchaudio
 
 
-print("[DEBUG] PWD =", os.getcwd())
-print("[DEBUG] c.TRAIN_HOST_PATH =", c.TRAIN_HOST_PATH, "exists=", os.path.exists(c.TRAIN_HOST_PATH))
-print("[DEBUG] c.TRAIN_SECRET_PATH =", c.TRAIN_SECRET_PATH, "exists=", os.path.exists(c.TRAIN_SECRET_PATH))
-print("[DEBUG] host files =", os.listdir(c.TRAIN_HOST_PATH) if os.path.exists(c.TRAIN_HOST_PATH) else None)
-print("[DEBUG] secret files =", os.listdir(c.TRAIN_SECRET_PATH) if os.path.exists(c.TRAIN_SECRET_PATH) else None)
+#print("[DEBUG] PWD =", os.getcwd())
+#print("[DEBUG] c.TRAIN_HOST_PATH =", c.TRAIN_HOST_PATH, "exists=", os.path.exists(c.TRAIN_HOST_PATH))
+#print("[DEBUG] c.TRAIN_SECRET_PATH =", c.TRAIN_SECRET_PATH, "exists=", os.path.exists(c.TRAIN_SECRET_PATH))
+#print("[DEBUG] host files =", os.listdir(c.TRAIN_HOST_PATH) if os.path.exists(c.TRAIN_HOST_PATH) else None)
+#print("[DEBUG] secret files =", os.listdir(c.TRAIN_SECRET_PATH) if os.path.exists(c.TRAIN_SECRET_PATH) else None)
 
 def _resolve_path(root, item):
     # item 可能是 "host_000.wav" 或 "./data/val/host/host.wav" 或 "/content/InvASNet/..."
@@ -145,3 +145,4 @@ testloader = DataLoader(
     num_workers=0,
     drop_last=True
 )
+
