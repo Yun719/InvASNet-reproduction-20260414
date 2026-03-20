@@ -89,7 +89,7 @@ class InvASNetAudioPairDataset(Dataset):
         if self.use_synth:
             return self._make_synth()
         #print("[DEBUG] TRAIN_HOST_PATH =", c.TRAIN_HOST_PATH,
-      "files =", os.listdir(c.TRAIN_HOST_PATH) if os.path.exists(c.TRAIN_HOST_PATH) else None)
+      #"files =", os.listdir(c.TRAIN_HOST_PATH) if os.path.exists(c.TRAIN_HOST_PATH) else None)
 
         #print("[DEBUG] TRAIN_SECRET_PATH =", c.TRAIN_SECRET_PATH, "files =", os.listdir(c.TRAIN_SECRET_PATH) if os.path.exists(c.TRAIN_SECRET_PATH) else None)
 
