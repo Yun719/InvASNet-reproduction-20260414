@@ -12,6 +12,8 @@ import torchaudio
 #print("[DEBUG] host files =", os.listdir(c.TRAIN_HOST_PATH) if os.path.exists(c.TRAIN_HOST_PATH) else None)
 #print("[DEBUG] secret files =", os.listdir(c.TRAIN_SECRET_PATH) if os.path.exists(c.TRAIN_SECRET_PATH) else None)
 
+# datasets.py 唯的一任務，就是去硬碟裡把你存放的 .wav 音檔挖出來，把它們切得整整齊齊，然後打包送進顯示卡裡給大廚烹飪。
+
 def _resolve_path(root, item):
     # item 可能是 "host_000.wav" 或 "./data/val/host/host.wav" 或 "/content/InvASNet/..."
     item = str(item)
@@ -59,7 +61,7 @@ class InvASNetAudioPairDataset(Dataset):
         self.seg_len = int(getattr(c, "segment_length", 44160))
         self.channels = int(getattr(c, "channels_in", 1))
 
-        # If no real audio, we'll use synthetic fallback
+        # 如果發現找不到檔案，它會自動開啟「合成模式 (_make_synth)」，自己用數學公式產生出類似「嗶——」的假聲音（正弦波 + 雜音）來代替
         self.use_synth = (len(self.host_files) == 0) or (len(self.secret_files) == 0)
 
         # For real audio mode later, we will require 1-to-1 pairing by index.
@@ -94,16 +96,20 @@ class InvASNetAudioPairDataset(Dataset):
         #print("[DEBUG] TRAIN_SECRET_PATH =", c.TRAIN_SECRET_PATH, "files =", os.listdir(c.TRAIN_SECRET_PATH) if os.path.exists(c.TRAIN_SECRET_PATH) else None)
 
         # Real audio mode (to be implemented when you have wav files)
-        # For now, we keep it strict so you notice if you accidentally think it's reading files.
+        # 當程式讀到真正的 .wav 檔案時，它會對聲音進行「強迫症般」的標準化處理：
         def _load_wav_mono_44k(path, target_sr=44100, target_len=16384):
             wav, sr = torchaudio.load(path)          # wav: (C, T)
+            # 強制轉單聲道，如果你的音檔是左右聲道（立體聲），它會把它們平均起來，變成單聲道。
             if wav.shape[0] > 1:
                 wav = wav.mean(dim=0, keepdim=True)  # stereo -> mono
 
             if sr != target_sr:
-                wav = torchaudio.functional.resample(wav, sr, target_sr)
+                wav = torchaudio.functional.resample(wav, sr, target_sr)    # 強制統一音質，如果音檔的採樣率不是設定的 44100，它會自動幫你轉檔。
 
             # pad / crop to fixed length
+            # 強制裁切長度 (最重要！)，神經網路一次只能處理固定長度的資料（我們在 config 裡設定的 segment_length = 44160）。
+            # 如果音檔太短，它會補上靜音（0）來湊滿長度 (pad)。
+            # 如果音檔太長（例如一首 3 分鐘的歌），它會隨機切一段 44160 長度的片段出來 (torch.randint)。這不僅解決了長度問題，還順便做到了「資料擴增（Data Augmentation）」，讓模型每次都聽到同一首歌的不同段落，變相增加訓練資料！
             T = wav.shape[1]
             if T < target_len:
                 wav = torch.nn.functional.pad(wav, (0, target_len - T))
