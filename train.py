@@ -185,9 +185,13 @@ def main():
             loss_list = []
             g_list, r_list, l_list = [], [], []
 
-            for i_batch, batch in enumerate(datasets.trainloader):
+            from tqdm import tqdm  # 引入進度條套件
+
+            # 將原本的迴圈包裝進 tqdm 進度條中
+            pbar = tqdm(enumerate(datasets.trainloader), total=steps_per_epoch, desc=f"Epoch {i_epoch}")
+            for i_batch, batch in pbar:
                 if i_batch >= steps_per_epoch:
-                  break
+                    break
                 cover, secret = to_device_batch(batch, device)
 
                 # 1) DWT
@@ -242,6 +246,8 @@ def main():
                 r_list.append(float(r_loss.item()))
                 l_list.append(float(l_loss.item()))
 
+                # 讓進度條旁邊即時顯示最新的誤差值
+                pbar.set_postfix({"Loss": f"{total.item():.6f}"})
             # epoch stats
             epoch_loss = float(np.mean(loss_list)) if len(loss_list) else float("nan")
             lr_log10 = float(math.log10(optimizer.param_groups[0]["lr"]))

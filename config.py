@@ -52,7 +52,7 @@ VAL_SECRET_PATH   = os.path.join(INVASN_DATA_ROOT, "val", "secret")
 
 # ---- misc ----
 silent = False
-progress_bar = False
+progress_bar = True    # 要不要顯示進度條?
 live_visualization = False
 loss_display_cutoff = 2.0
 loss_names = ["L", "lr"]

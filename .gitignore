@@ -5,3 +5,5 @@ model/
 *.wav
 *.pt
 *.zip
+.venv/
+runs/
