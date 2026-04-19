@@ -28,8 +28,19 @@ audio_steganography_project/
 └── app.py                       # 使用模型的 UI 使用者介面程式
 └── yt2wav - time.bat            # 用來從 Youtube 抓指定時間段下來的程式 (需要裝 FFmpeg 和 yt-dlp)
 ```
+# 隱藏相關
 
-# 訓練用資料集
+## 如何跑 app.py？
+
+　　首先確保目錄下有 `model/` 這個資料夾，`model/` 中需要有檔案名稱為 `model.pt` 的檔案，這個是模型檔，現階段 `app.py` 是寫死吃這個路徑，未來會新增選擇 / 切換模型功能。
+
+　　建議載體音訊和秘密音訊建議抓 30 秒左右，太長會需要很多時間去跑，而音訊可以利用 `yt2wav - time.bat` 抓 Youtube 的音樂
+
+---
+
+# 訓練相關
+
+## 訓練用資料集
 
 >需要自行建立 `data/` 資料夾，再將訓練用資料放入，請參考**架構**建置資料夾
 
@@ -38,7 +49,7 @@ audio_steganography_project/
   + 選擇 `dev-clean.tar.gz` 
 + 在 windows 環境下，在檔案總管的搜尋欄輸入 `*.flac` 可以一次找到資料夾下（包含子資料夾）的 `*.flac` 檔案
 
-## 轉換格式
+### 轉換格式
 
 因為資料集的檔案格式程式不吃（程式只吃 `.wav`），所以需要使用 `FFmpeg` 轉成 `.wav` 格式，這裡提供 Windows `CMD` 轉換指令
 
@@ -61,7 +72,7 @@ del *.flac *.au
 
 ---
 
-# 必要套件
+## 必要套件
 
 python 版本：3.12.4 （其他版本不確定行不行）
 
@@ -77,7 +88,7 @@ pip install numpy scipy tqdm matplotlib tensorboardx soundfile gradio
 
 ---
 
-# 參數設定
+## 參數設定
 和參數有關的設定都在 `config.py` 中
 
 比較重要的有
@@ -88,7 +99,7 @@ pip install numpy scipy tqdm matplotlib tensorboardx soundfile gradio
 
 ---
 
-# 如何繼續訓練 ?
+## 如何繼續訓練 ?
 每跑完 1 個 Epoch 會在 `model/` 下生成 1 個 `model_checkpoint_XXXXX.pt`，需要到 `config.py` 設定
 - tain_next = True
 - trained_epoch = 上次跑到的第 ? 個 Epoch
@@ -104,10 +115,6 @@ pip install numpy scipy tqdm matplotlib tensorboardx soundfile gradio
 
 ---
 
-# 如何跑 app.py？
 
-　　首先確保目錄下有 `model/` 這個資料夾，`model/` 中需要有檔案名稱為 `model.pt` 的檔案，這個是模型檔，現階段 `app.py` 是寫死吃這個路徑，未來會新增自行選擇 / 切換模型功能。
-
-　　建議載體音訊和秘密音訊建議抓 30 秒左右，太長會需要很多時間去跑，而音訊可以利用 `yt2wav - time.bat` 抓 Youtube 的音樂
 
 　　
