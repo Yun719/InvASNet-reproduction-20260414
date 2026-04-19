@@ -25,6 +25,7 @@ import viz
 
 from model import Model, init_model
 from modules.dwt1d import DWT1D, IWT1D
+from tqdm import tqdm  # 引入進度條套件
 
 try:
     from tensorboardX import SummaryWriter
@@ -185,7 +186,7 @@ def main():
             loss_list = []
             g_list, r_list, l_list = [], [], []
 
-            from tqdm import tqdm  # 引入進度條套件
+
 
             # 將原本的迴圈包裝進 tqdm 進度條中
             pbar = tqdm(enumerate(datasets.trainloader), total=steps_per_epoch, desc=f"Epoch {i_epoch}")
@@ -193,6 +194,7 @@ def main():
                 if i_batch >= steps_per_epoch:
                     break
                 cover, secret = to_device_batch(batch, device)
+
 
                 # 1) DWT
                 cover_d = dwt(cover)     # (B, 2C, L/2)
@@ -215,7 +217,7 @@ def main():
 
                 # 4) backward (recover)
                 z_rand = gauss_noise_like(y_z)
-                y_rev_in = torch.cat([y_steg, y_z], dim=1)
+                y_rev_in = torch.cat([y_steg, z_rand], dim=1)
                 x_hat = net(y_rev_in, rev=True)
                 check_finite("x_hat", x_hat)
 
@@ -254,7 +256,7 @@ def main():
             print(f"{i_epoch:04d}    {epoch_loss:.6f}   {lr_log10:.4f}")
 
             # viz / tensorboard
-            viz.show_loss([epoch_loss, lr_log10])
+            #viz.show_loss([epoch_loss, lr_log10])
             if writer is not None:
                 writer.add_scalars("Train", {"Loss": epoch_loss}, i_epoch)
                 writer.add_scalars("TrainParts", {
@@ -268,7 +270,11 @@ def main():
                 net.eval()
                 with torch.no_grad():
                     vloss = []
-                    for batch in datasets.testloader:
+
+                    # 🌟 這裡加上 tqdm 進度條 🌟
+                    val_pbar = tqdm(datasets.testloader, desc=f"Val Epoch {i_epoch}")
+
+                    for batch in val_pbar:
                         cover, secret = to_device_batch(batch, device)
                         cover_d = dwt(cover)
                         secret_d = dwt(secret)
@@ -293,10 +299,8 @@ def main():
                         total = lam_r * r_loss + lam_g * g_loss + lam_l * l_loss
                         vloss.append(float(total.item()))
 
-                    val_loss = float(np.mean(vloss)) if vloss else float("nan")
-                    print(f"[VAL] epoch {i_epoch:04d} loss={val_loss:.6f}")
-                    if writer is not None:
-                        writer.add_scalars("Val", {"Loss": val_loss}, i_epoch)
+                        # 🌟 讓進度條旁邊即時顯示考試的 Loss 🌟
+                        val_pbar.set_postfix({"Loss": f"{total.item():.6f}"})
 
             # save
             if save_freq > 0 and (i_epoch % save_freq == 0):
@@ -324,7 +328,7 @@ def main():
     finally:
         if writer is not None:
             writer.close()
-        viz.signal_stop()
+        #viz.signal_stop()
 
 
 if __name__ == "__main__":

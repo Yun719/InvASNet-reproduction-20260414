@@ -23,7 +23,10 @@ audio_steganography_project/
 │
 ├── README.md                    # 專案說明檔 (記錄怎麼啟動程式、修改了哪些架構)
 │
-└── auto_push.bat                # 用來方便 push 到 Github 的 Windows 腳本批次檔
+├── auto_push.bat                # 用來方便 push 到 Github 的 Windows 腳本批次檔
+│
+└── app.py                       # 使用模型的 UI 使用者介面程式
+└── yt2wav - time.bat            # 用來從 Youtube 抓指定時間段下來的程式 (需要裝 FFmpeg 和 yt-dlp)
 ```
 
 # 訓練用資料集
@@ -67,7 +70,7 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 ```
 
 ```bash
-pip install numpy scipy tqdm matplotlib tensorboardx soundfile 
+pip install numpy scipy tqdm matplotlib tensorboardx soundfile gradio
 ```
 
 
@@ -82,3 +85,29 @@ pip install numpy scipy tqdm matplotlib tensorboardx soundfile
 - **epochs**：訓練次數
 - **tain_next**：是否讀取上次的訓練進度
 - **progress_bar**：要不要顯示訓練的進度條
+
+---
+
+# 如何繼續訓練 ?
+每跑完 1 個 Epoch 會在 `model/` 下生成 1 個 `model_checkpoint_XXXXX.pt`，需要到 `config.py` 設定
+- tain_next = True
+- trained_epoch = 上次跑到的第 ? 個 Epoch
+- epochs = 總共要跑幾次 - 上次跑到的 Epoch 次
+- suffix = "model_checkpoint_XXXXXX.pt" 
+
+假設上次跑到第 20 輪，想要繼續跑到第 70 輪，那麼要這樣設定：
+
+- tain_next = True
+- trained_epoch = 20
+- epochs = 50
+- suffix = "model_checkpoint_00020.pt" 
+
+---
+
+# 如何跑 app.py？
+
+　　首先確保目錄下有 `model/` 這個資料夾，`model/` 中需要有檔案名稱為 `model.pt` 的檔案，這個是模型檔，現階段 `app.py` 是寫死吃這個路徑，未來會新增自行選擇 / 切換模型功能。
+
+　　建議載體音訊和秘密音訊建議抓 30 秒左右，太長會需要很多時間去跑，而音訊可以利用 `yt2wav - time.bat` 抓 Youtube 的音樂
+
+　　
