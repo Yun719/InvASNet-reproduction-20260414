@@ -1,0 +1,272 @@
+## 程式碼
+
+```python
+from math import exp  
+import torch  
+import torch.nn as nn  
+import config as c  
+from rrdb_denselayer_1d import ResidualDenseBlock_out_1D  
+  
+  
+  
+class INV_block(nn.Module):  
+    def __init__(self, subnet_constructor=ResidualDenseBlock_out_1D, clamp=c.clamp, harr=True, in_1=1, in_2=1):  
+        super().__init__()  
+        if harr:  
+            self.split_len1 = in_1 * 2  
+            self.split_len2 = in_2 * 2  
+        self.clamp = clamp  
+        # ρ  
+        self.r = subnet_constructor(self.split_len1, self.split_len2)  
+        # η  
+        self.y = subnet_constructor(self.split_len1, self.split_len2)  
+        # φ  
+        self.f = subnet_constructor(self.split_len2, self.split_len1)  
+  
+    def e(self, s):  
+        v = self.clamp * 2 * (torch.sigmoid(s) - 0.5)  
+        v = torch.clamp(v, -10.0, 10.0)   # 防止 exp overflow        return torch.exp(v)  
+  
+  
+    def forward(self, x, rev=False):  
+        x1, x2 = (x.narrow(1, 0, self.split_len1),  
+                  x.narrow(1, self.split_len1, self.split_len2))  
+  
+        if not rev:  
+  
+            t2 = self.f(x2)  
+            y1 = x1 + t2  
+            s1, t1 = self.r(y1), self.y(y1)  
+            y2 = self.e(s1) * x2 + t1  
+  
+        else:  
+  
+            s1, t1 = self.r(x1), self.y(x1)  
+            y2 = (x2 - t1) / self.e(s1)  
+            t2 = self.f(y2)  
+            y1 = (x1 - t2)  
+  
+        return torch.cat((y1, y2), 1)
+```
+
+## 流程
+
+### 1. 拆成 2 半
+
+首先會將輸入的特徵沿著通道 (Channel) 拆分成兩半：$x_1$ 與 $x_2$。
+
+```python
+x1, x2 = (x.narrow(1, 0, self.split_len1),  
+          x.narrow(1, self.split_len1, self.split_len2))
+```
+
+split_len1 的定義可以在 `__init__`  找到：
+
+```python
+if harr:  
+    self.split_len1 = in_1 * 2  
+    self.split_len2 = in_2 * 2
+```
+
+`in_1` 是通道數，以聲音來講，1 代表單聲道，2 代表立體聲（左耳和右耳各兩條音軌）
+
+而 `narrow` 是 `PyTorch` 的其中一個用來切割用的函數，其傳入參數如下：
+
+```python
+x.narrow(dim, start, length)
+```
+
+`dim` 是維度
+
+`x` 會被拆成 `x1` 和 `x2` ，這裡的 `x1` 代表的是音樂，`x2` 代表的是語音
+### 2. 三個變數
+
+有 3 個挺重要的變數：
+- $\phi$：負責處理 $x_2$，並將結果加到 $x_1$ 上。（`self.f`）
+- $\rho$：負責計算**縮放 (Scale)** 係數。（`self.r`）
+- $\eta$：負責計算**平移 (Translation)** 係數。（`self.y`）
+
+程式中有顯眼的註解標示著他們的宣告
+
+```python
+# ρ  
+self.r = subnet_constructor(self.split_len1, self.split_len2)  
+# η  
+self.y = subnet_constructor(self.split_len1, self.split_len2)  
+# φ  
+self.f = subnet_constructor(self.split_len2, self.split_len1) 
+```
+
+這裡的 `subnet_constructor()` 和 `rrdb_denselayer_1d.py` 這個程式有關
+
+[rrdb 說明筆記](rrdb_denselayer_1d.py_說明筆記)
+
+#### 如果是正向傳播（rev=False）
+
+輸入為 $x_1$ 與 $x_2$，輸出為更新後的 $y_1$ 與 $y_2$。
+
+對應程式碼：
+```python
+if not rev:  
+    t2 = self.f(x2)  
+    y1 = x1 + t2  
+    s1, t1 = self.r(y1), self.y(y1)  
+    y2 = self.e(s1) * x2 + t1
+```
+
+1. 先用 $x_2$ 來更新 $x_1$：
+
+$$y_1 = x_1 + \phi(x_2)$$
+
+2. 再用剛算出的 $y_1$ 來計算縮放 ($s_1$) 與平移 ($t_1$) 係數：
+
+$$s_1 = \rho(y_1)$$
+
+$$t_1 = \eta(y_1)$$
+3. 對 $x_2$ 進行仿射轉換 (Affine Transformation)：
+$$y_2 = x_2 \cdot \exp(s_1) + t_1$$
+#### 如果是反向傳播（rev=True）
+
+在反向模式中，輸入的變數 `x1` 與 `x2` 實際上是正向傳播結果的 $y_1$ 與 $y_2$。我們要逆推回原本的 $x_1$ 與 $x_2$。
+
+```python
+else:  
+    s1, t1 = self.r(x1), self.y(x1)  
+    y2 = (x2 - t1) / self.e(s1)  
+    t2 = self.f(y2)  
+    y1 = (x1 - t2)
+```
+
+1. 因為我們已經有 $y_1$，可以直接算出原本的縮放與平移係數：
+$$s_1 = \rho(y_1)$$
+
+$$t_1 = \eta(y_1)$$
+2. 透過反向仿射轉換，推回原本的 $x_2$：
+	- 將先前的仿射轉換進行移項
+$$y_2 = x_2 \cdot \exp(s_1) + t_1$$
+	- 移項後可以得到 $x_2$ 
+$$x_2 = \frac{y_2 - t_1}{\exp(s_1)}$$
+3. 有了原本的 $x_2$，就能推回原本的 $x_1$：
+$$x_1 = y_1 - \phi(x_2)$$
+
+#### 易懂解釋
+
+```python
+# 正向
+t2 = self.f(x2)
+y1 = x1 + t2                        # 音樂' = 音樂 + f(語音)
+s1, t1 = self.r(y1), self.y(y1)
+y2 = self.e(s1) * x2 + t1           # 語音' = e(r(音樂')) × 語音 + η(音樂')
+
+# 反向
+s1, t1 = self.r(x1), self.y(x1)
+y2 = (x2 - t1) / self.e(s1)         # 語音 = (語音' - η(音樂')) / e(r(音樂'))
+t2 = self.f(y2)
+y1 = (x1 - t2)                      # 音樂 = 音樂' - f(語音)
+
+```
+
+
+### 其他細節
+
+#### A. 初始化(`__init__`)
+- **通道切分**：`split_len1` 和 `split_len2` 決定了特徵要怎麼對半切。如果開啟了 `harr=True` (通常代表 Harr 小波轉換)，通道數會乘以 2。
+- **定義子網路**：初始化了前面提到的三個網路模組 `self.r`, `self.y`, `self.f`。
+
+```python
+def __init__(self, subnet_constructor=ResidualDenseBlock_out_1D, clamp=c.clamp, harr=True, in_1=1, in_2=1):  
+    super().__init__()  
+    if harr:  
+        self.split_len1 = in_1 * 2  
+        self.split_len2 = in_2 * 2  
+    self.clamp = clamp  
+    # ρ  
+    self.r = subnet_constructor(self.split_len1, self.split_len2)  
+    # η  
+    self.y = subnet_constructor(self.split_len1, self.split_len2)  
+    # φ  
+    self.f = subnet_constructor(self.split_len2, self.split_len1)
+```
+
+#### B. 安全的指數函數 (`e`)
+
+```python
+def e(self, s):
+    v = self.clamp * 2 * (torch.sigmoid(s) - 0.5)
+    v = torch.clamp(v, -10.0, 10.0)   # 防止 exp overflow
+    return torch.exp(v)
+```
+
+如果直接計算 $\exp(s)$，當網路初期還不穩定、$s$ 稍微大一點點時，很容易引發數值爆炸 (Overflow) 產生 `NaN`。
+
+- **解法**：先用 `sigmoid` 將輸出壓制在 $(-0.5, 0.5)$ 之間，乘上縮放係數 `clamp`，最後再用 `torch.clamp` 強制把數值鎖死在 $[-10.0, 10.0]$ 的安全範圍內。
+
+> `clamp` 的定義在 `config.py` 中
+
+
+#### C. 前向傳遞邏輯 (`forward`)
+
+- **`x.narrow`**：用來將 Tensor 沿著維度 1 (Channel) 切割成 `x1` 與 `x2`，這比一般的 slicing 效能更好一些。
+
+- **`torch.cat`**：最後將處理好的兩半特徵重新拼接起來，往下一層傳遞。
+
+```python
+return torch.cat((y1, y2), 1)
+```
+
+`torch.cat` 是 PyTorch 中的**拼接 (Concatenate)** 函數。這行程式碼的意思是：**將處理完的張量 `y1` 和 `y2`，沿著第 1 個維度（也就是 Channels 通道）重新合併成一個大張量**
+##### 參數拆解
+
+- **`(y1, y2)`**：準備要合併的張量。這裡把 `y1` 和 `y2` 包成一個組合（Tuple）傳進去。注意，`y1` 會接在前面，`y2` 會接在後面。
+    
+- **`1`**：代表 `dim=1`，也就是指定沿著「第 1 維度（特徵通道）」來進行拼接。因為程式一開始是從第 1 維度把資料切開的，所以最後也要沿著第 1 維度把它們黏回去。
+
+##### 形狀 (Shape) 的變化
+
+我們用具體的數字來想像，假設一次處理 4 段聲音 (Batch=4)，聲音長度是 1000：
+
+- `y1` 的形狀如果是 `[4, 64, 1000]`
+    
+- `y2` 的形狀如果是 `[4, 64, 1000]`
+    
+
+經過 `torch.cat((y1, y2), 1)` 後，通道數 (64 + 64) 會加總起來，但 Batch 數量與時間長度保持不變，輸出的形狀會完美變回： **`[4, 128, 1000]`**
+
+這樣一來，輸入這個網路層（`INV_block`）的資料形狀是 `[4, 128, 1000]`，經過拆分、運算、再合併後，輸出的形狀依舊是 `[4, 128, 1000]`。這保證了神經網路在串聯很多層的時候，資料大小能完美對接。
+
+## 和 Hiding speech in musicfiles 論文的差異
+
+程式的寫法是
+
+```python
+# 正向
+t2 = self.f(x2)
+y1 = x1 + t2                        # 音樂' = 音樂 + f(語音)
+s1, t1 = self.r(y1), self.y(y1)
+y2 = self.e(s1) * x2 + t1           # 語音' = e(r(音樂')) × 語音 + η(音樂')
+
+# 反向
+s1, t1 = self.r(x1), self.y(x1)
+y2 = (x2 - t1) / self.e(s1)         # 語音 = (語音' - η(音樂')) / e(r(音樂'))
+t2 = self.f(y2)
+y1 = (x1 - t2)                      # 音樂 = 音樂' - f(語音)
+```
+
+但實際論文提的方法是雙側仿射
+
+```
+想像你有兩個變數：音樂(h) 和 語音(s)
+
+步驟 1：
+  音樂' = 音樂 × 某個函數(語音) + 另一個函數(語音)
+  ↑ 把語音的資訊「編碼」進音樂
+
+步驟 2：
+  語音' = 語音 × 某個函數(音樂') + 另一個函數(音樂')
+  ↑ 再調整語音
+
+逆轉時：
+  只要反向做「減法和除法」就能完美還原！
+```
+
+根據 AI 的說法，實務上為了穩定性會選擇第一種作法

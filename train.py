@@ -34,7 +34,7 @@ except Exception:
     TENSORBOARD_OK = False
 
 warnings.filterwarnings("ignore")
-steps_per_epoch = 200 
+steps_per_epoch = 500
 
 # -----------------------------
 # Utils

@@ -126,7 +126,7 @@ with gr.Blocks(title="InvASNet 隱寫測試平台") as app:
                 with gr.Column():
                     in_cover = gr.Audio(label="Host 音樂 (Cover)", type="filepath")
                     in_secret = gr.Audio(label="Secret 音樂 (Secret)", type="filepath")
-                    secret_vol = gr.Slider(minimum=0.01, maximum=1.0, value=0.2, step=0.05,
+                    secret_vol = gr.Slider(minimum=0.01, maximum=1.0, value=0.2, step=0.01,
                                            label="🗜️ 秘密音量縮放 (建議 0.2)")
                     btn_hide = gr.Button("開始隱寫 (Hide)", variant="primary")
                 with gr.Column():

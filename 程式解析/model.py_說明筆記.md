@@ -1,0 +1,218 @@
+>檔案：`model.py` 在系統中的角色：**最外層的模型封裝 + 全域權重初始化**
+
+## 一、這個檔案在整個系統的哪裡？
+
+```
+train.py / app.py          ← 呼叫 Model 的地方
+    ↓
+model.py   ← ⭐ 你現在在這裡（封裝 + 初始化）
+    ↓
+hinet.py                   ← 16 層 INV_block 的堆疊
+    ↓
+invblock.py                ← 可逆耦合層
+    ↓
+rrdb_denselayer_1d.py      ← 特徵提取子網路
+```
+
+`model.py` 非常短，只做兩件事：
+
+1. **用 `Model` 類別把 `Hinet` 包起來**，提供一個統一的對外介面
+2. **`init_model` 函數**，在訓練開始前把所有參數初始化成合理的初始值
+
+## 二、完整程式碼 + 註解版
+
+```python
+import torch.optim          # 雖然這裡沒直接用到，train.py 會用
+import torch.nn as nn
+import config as c           # 讀取 init_scale 等超參數
+from hinet import Hinet      # 引入真正的模型主體
+
+
+class Model(nn.Module):
+    def __init__(self):
+        super(Model, self).__init__()
+        # 整個神經網路的主體就是一個 Hinet 實例
+        # Hinet 裡面有 16 個 INV_block
+        self.model = Hinet()
+
+    def forward(self, x, rev=False):
+        # rev=False → 正向（隱藏秘密）
+        # rev=True  → 反向（還原秘密）
+        if not rev:
+            out = self.model(x)           # 直接呼叫 Hinet 正向
+
+        else:
+            out = self.model(x, rev=True) # 呼叫 Hinet 反向
+
+        return out
+
+
+def init_model(mod):
+    """
+    在訓練開始前，對模型的所有可訓練參數做自訂初始化。
+    mod：傳入 Model 的實例
+    """
+    for key, param in mod.named_parameters():
+        # key 的格式例如：
+        #   "model.inv1.r.conv1.weight"
+        #   "model.inv1.r.conv5.bias"
+        split = key.split('.')   # 把名字按 '.' 切成清單
+
+        if param.requires_grad:  # 只處理可訓練的參數
+            # ── 步驟 1：所有參數先用小尺度隨機初始化 ──
+            param.data = c.init_scale * torch.randn_like(
+                param.data, device=param.device
+            )
+            # init_scale = 0.01，所以初始值都很小（接近 0 但不完全是 0）
+
+            # ── 步驟 2：如果這個參數屬於 conv5，直接蓋成全零 ──
+            if split[-2] == 'conv5':
+                param.data.fill_(0.)
+            # split[-2] 是參數名稱的「倒數第二段」
+            # 例如 "model.inv1.r.conv5.weight" → split[-2] = 'conv5'
+            #      "model.inv1.r.conv5.bias"   → split[-2] = 'conv5'
+```
+
+## 三、`Model` 類別：為什麼要多包一層？
+
+`Hinet` 本身已經是完整的模型，為什麼還要再包一個 `Model`？
+
+|原因|說明|
+|---|---|
+|**統一介面**|`train.py` 和 `app.py` 只需要知道 `Model`，不用管底層是不是 `Hinet`|
+|**未來擴充**|如果之後想在 `Hinet` 前後加前處理/後處理層，只需改 `Model`|
+|**PyTorch 慣例**|習慣上把最終模型封裝成一個 `nn.Module` 統一管理|
+目前 `Model` 幾乎是透明的（沒有額外邏輯），等同於直接呼叫 `Hinet`：
+
+```python
+Model.forward(x)            ≡  Hinet.forward(x)
+Model.forward(x, rev=True)  ≡  Hinet.forward(x, rev=True)
+```
+
+## 四、`init_model` 初始化函數詳解
+
+### 4.1 為什麼不用 PyTorch 預設初始化？
+
+PyTorch 預設用 **Kaiming 均勻分布**初始化卷積層，這對一般 CNN 很好， 但對**可逆神經網路（INN）** 有問題：
+
+>若子網路（`conv5`）輸出的初始值太大， `INV_block` 的縮放因子 `e(s) = exp(...)` 就會爆炸， 第一個 batch 就出現 NaN，訓練直接掛掉。
+
+### 4.2 兩步初始化策略
+
+```
+所有參數 ──→ × 0.01 的小隨機值 （讓整體輸出幅度很小）
+↓
+conv5 的參數 ──→ 全部填 0 （確保子網路初始輸出 = 0）
+```
+
+**初始效果：**
+
+```
+conv5 輸出 = 0
+  → f(x2) = 0  → y1 = x1 + 0 = x1        （音樂不變）
+  → r(y1) = 0, η(y1) = 0
+  → e(0) = exp(0) = 1
+  → y2 = 1 × x2 + 0 = x2                  （語音不變）
+
+整個 INV_block ≈ 恆等函數（什麼都不做）
+```
+
+這段涉及到 [invblock.py_說明筆記](invblock.py_說明筆記) 耦合層的公式
+
+訓練從「安全的起點」開始，逐漸學習如何轉換，不會一開始就崩潰。
+
+### 4.3 `named_parameters()` 回傳的 key 範例
+
+```
+model.inv1.r.conv1.weight
+model.inv1.r.conv1.bias
+model.inv1.r.conv2.weight
+...
+model.inv1.r.conv5.weight    ← split[-2] = 'conv5' ✅ 會被填 0
+model.inv1.r.conv5.bias      ← split[-2] = 'conv5' ✅ 會被填 0
+model.inv1.y.conv1.weight
+...
+model.inv16.f.conv5.weight   ← split[-2] = 'conv5' ✅ 會被填 0
+```
+
+所有 `inv1` 到 `inv16` 裡，所有子網路（`r`, `y`, `f`）的 `conv5` 都會被歸零。
+
+## 五、在 train.py 中如何使用
+
+```python
+# train.py 的使用流程
+net = Model().to(device)   # 建立模型，搬到 GPU/CPU
+init_model(net)            # ⭐ 自訂初始化（取代 PyTorch 預設）
+
+# 之後正常訓練
+y = net(x, rev=False)      # 正向：隱藏
+x_hat = net(y_rev_in, rev=True)  # 反向：還原
+```
+
+## 六、如何修改這個模組
+
+### 6.1 更換底層模型（不用 Hinet，換成別的）
+
+```python
+from my_new_model import MyNewNet  # 換成你自己的模型
+
+class Model(nn.Module):
+    def __init__(self):
+        super(Model, self).__init__()
+        self.model = MyNewNet()    # ← 只改這裡
+    # forward 保持不動
+```
+
+### 6.2 調整初始化尺度
+
+```cpp
+# config.py 裡
+init_scale = 0.01   # 原本
+init_scale = 0.001  # 改得更小 → 初始輸出更接近 0 → 更穩定但學習更慢
+init_scale = 0.05   # 改得更大 → 初始值更大 → 有可能 NaN，不建議
+```
+
+### 6.3 如果換了子網路，conv5 的名字可能不同
+
+假設你把 `conv5` 改名為 `out_conv`：
+
+```python
+# init_model 裡要對應修改
+if split[-2] == 'conv5':      # 原本
+if split[-2] == 'out_conv':   # 改成你的新名字
+    param.data.fill_(0.)
+```
+
+>⚠️ 如果忘記更新這裡，輸出層不會被歸零，訓練很可能一開始就出現 NaN。
+
+### 6.4 在模型前後加額外處理（例如正規化層）
+
+```python
+class Model(nn.Module):
+    def __init__(self):
+        super(Model, self).__init__()
+        self.norm = nn.BatchNorm1d(4)   # 新增前處理
+        self.model = Hinet()
+
+    def forward(self, x, rev=False):
+        if not rev:
+            x = self.norm(x)            # 先正規化
+            out = self.model(x)
+        else:
+            out = self.model(x, rev=True)
+            # 注意：反向時要不要 norm 的逆操作？需要謹慎考量
+        return out
+```
+
+>⚠️ 在 INN 中加非可逆層（如 BatchNorm）需要特別注意，可能破壞可逆性。
+
+## 七、常見問題
+
+**Q：`import torch.optim` 在這裡有用嗎？**
+> 嚴格來說沒有直接用到，可以移除。它可能是從舊版複製過來的殘留 import。
+
+**Q：`init_model` 為什麼不寫成 `Model` 的方法？**
+> 寫成獨立函數是為了彈性：你可以對任何 `nn.Module` 呼叫它， 不限於 `Model` 這個類別。
+
+**Q：每次載入已存的 checkpoint 還需要呼叫 `init_model` 嗎？**
+> **不需要！** `init_model` 只在**全新訓練**時呼叫一次。 載入 checkpoint 後，參數已經是訓練好的值，再呼叫 `init_model` 會把它清掉。
