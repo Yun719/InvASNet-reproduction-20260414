@@ -99,7 +99,7 @@ self.f = subnet_constructor(self.split_len2, self.split_len1)
 
 這裡的 `subnet_constructor()` 和 `rrdb_denselayer_1d.py` 這個程式有關
 
-[rrdb 說明筆記](rrdb_denselayer_1d.py_說明筆記)
+[rrdb 說明筆記](rrdb_denselayer_1d.py_說明筆記.md)
 
 #### 如果是正向傳播（rev=False）
 

@@ -127,7 +127,7 @@ class Hinet(nn.Module):
 
 程式裡的 `out = self.inv15(out, rev=True)` 這段，意思是把 `(out, rev=True)` 傳給 `invblock.py` 的 `forward(self, x, rev=False)`
 
-[inv_block.py說明筆記](invblock.py_說明筆記)
+[inv_block.py說明筆記](invblock.py_說明筆記.md)
 
 ## 四、資料流維度追蹤
 
@@ -144,7 +144,7 @@ Hinet 前後維度完全不變：
 >每個 INV_block 輸入和輸出維度相同，所以串多少層都不影響形狀。  
 以預設值 B=2, C=1, L=44160 為例，資料全程都是 **(2, 4, 22080)**。
 
-關於維度的說明，可以看 [rrdb 說明筆記 (B,C,L) 的部分](rrdb_denselayer_1d.py_說明筆記)
+關於維度的說明，可以看 [rrdb 說明筆記 (B,C,L) 的部分](rrdb_denselayer_1d.py_說明筆記.md)
 
 ## 五、16 層的視覺化流程圖
 
