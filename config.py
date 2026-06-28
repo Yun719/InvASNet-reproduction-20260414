@@ -18,7 +18,7 @@ secret_sr = 16000   # 「秘密聲音 (Secret)」預期是 16 kHz（一般的語
 # ---- training hyperparams ----
 log10_lr = -4.5         # 學習率 (Learning Rate)。也就是教練每次巴 AI 頭的「力道」。這裡設定為 $10^{-4.5}$（大約 0.0000316），這是一個在訓練可逆神經網路時非常常見且安全的「微調力道」。
 lr = 10 ** log10_lr
-epochs = 20         # 總共要讓 AI 訓練幾個日夜輪迴。
+epochs = 10         # ✨總共要讓 AI 訓練幾個日夜輪迴。
 
 betas = (0.5, 0.999)
 weight_decay = 1e-5
@@ -38,9 +38,9 @@ val_freq = 0        # 多久考一次試 ?
 MODEL_PATH = os.path.join(os.getcwd(), "model") + os.sep
 SAVE_freq = 1
 
-suffix = "model_checkpoint_00135.pt"     # 接著做的模型檔名
-tain_next = True       # 如果你今天訓練到第 10 個 Epoch 關掉電腦，明天想繼續，就把這個改成 True，它就會去 model 資料夾底下讀取 model.pt 繼續跑。
-trained_epoch = 135       # 上次跑到第幾輪 ?
+suffix = "model_checkpoint_00020.pt"     # ✨接著做的模型檔名
+tain_next = True      # ✨如果你今天訓練到第 10 個 Epoch 關掉電腦，明天想繼續，就把這個改成 True，它就會去 model 資料夾底下讀取 model.pt 繼續跑。
+trained_epoch = 20       # ✨上次跑到第幾輪 ?
 
 # ---- dataset paths (audio) ----
 INVASN_DATA_ROOT = "./data"  # 這代表所有的資料都要放在你目前這個程式碼資料夾裡面，一個名為 data 的子資料夾下。

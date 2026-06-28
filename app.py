@@ -73,7 +73,8 @@ def hide_audio(cover_path, secret_path, secret_vol):
         y = net(x, rev=False)
         y_steg = y.narrow(1, 0, split_factor * channels_in)
         steg_audio = iwt(y_steg)
-        steg_audio = torch.clamp(steg_audio, min=-1.0, max=1.0)
+        # 測試階段量化（論文 3.5 節）：round → clamp → 正規化回 [-1, 1]
+        steg_audio = torch.clamp(torch.round(32768.0 * steg_audio), -32768, 32767) / 32768.0
 
         output_path = "output_stego.wav"
         torchaudio.save(output_path, steg_audio.squeeze(0).cpu(), target_sr)

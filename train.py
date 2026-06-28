@@ -215,9 +215,19 @@ def main():
                 steg = iwt(y_steg)  # back to waveform (B, C, L)
                 check_finite("steg", steg)
 
+                # ✅ 新增：量化模擬（訓練階段用均勻噪聲）
+                # 1. 反正規化：假設 steg 在 [-1, 1]，映射到 16-bit 整數範圍
+                # 2. 加入均勻噪聲模擬量化誤差 n ~ U(-0.5, 0.5)
+                # 3. clamp 確保不超出 16-bit 範圍
+                # 4. 再除以 32768 正規化回 [-1, 1]，才能繼續送進網路
+                noise = torch.zeros_like(steg).uniform_(-0.5, 0.5)
+                steg_q = torch.clamp(32768.0 * steg + noise, -32768, 32767) / 32768.0
+                check_finite("steg_q", steg_q)    
+
                 # 4) backward (recover)
                 z_rand = gauss_noise_like(y_z)
-                y_rev_in = torch.cat([y_steg, z_rand], dim=1)
+                y_steg_q = dwt(steg_q)                                   # ← 量化後再 DWT 回頻域
+                y_rev_in = torch.cat([y_steg_q, z_rand], dim=1)          # ← 用量化版本
                 x_hat = net(y_rev_in, rev=True)
                 check_finite("x_hat", x_hat)
 
@@ -228,7 +238,7 @@ def main():
                 check_finite("secret_hat", secret_hat)
 
                 # 5) losses (照原 HiNet 的三個 loss 形式搬過來)
-                g_loss = mse_loss_mean(steg, cover)                # steg 要像 cover
+                g_loss = mse_loss_mean(steg_q, cover)                 # steg 要像 cover（波形域比較）
                 r_loss = mse_loss_mean(secret_hat, secret)         # recover secret
                 steg_low = y_steg.narrow(1, 0, channels_in)         # 1D low band
                 cover_low = cover_d.narrow(1, 0, channels_in)
