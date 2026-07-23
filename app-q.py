@@ -29,12 +29,9 @@ else:
 
 net.eval()
 
-channels_in         = int(getattr(c, "channels_in", 1))
-haar_levels         = int(getattr(c, "haar_levels", 1))
-quantize_simulation = bool(getattr(c, "quantize_simulation", False))
-split_factor        = 2 ** haar_levels
-target_sr           = getattr(c, "host_sr", 44100)
-print(f"[App] 量化模擬: {'ON' if quantize_simulation else 'OFF'}, haar_levels: {haar_levels}")
+channels_in = int(getattr(c, "channels_in", 1))
+split_factor = 2
+target_sr = getattr(c, "host_sr", 44100)
 
 
 # ==========================================
@@ -70,23 +67,14 @@ def hide_audio(cover_path, secret_path, secret_vol):
         secret = load_and_preprocess(secret_path, target_length=cover.shape[2])
         secret = secret * secret_vol
 
-        cover_d, secret_d = cover, secret
-        for _ in range(haar_levels):
-            cover_d = dwt(cover_d)
-            secret_d = dwt(secret_d)
+        cover_d = dwt(cover)
+        secret_d = dwt(secret)
         x = torch.cat([cover_d, secret_d], dim=1)
         y = net(x, rev=False)
         y_steg = y.narrow(1, 0, split_factor * channels_in)
-        steg_audio = y_steg
-        for _ in range(haar_levels):
-            steg_audio = iwt(steg_audio)
-        # 量化模擬（由 config.quantize_simulation 控制）
-        # True  → 模擬 16-bit WAV round 取整，與訓練時的量化行為對齊
-        # False → 只做 clamp，不做 round
-        if quantize_simulation:
-            steg_audio = torch.clamp(torch.round(32768.0 * steg_audio), -32768, 32767) / 32768.0
-        else:
-            steg_audio = torch.clamp(steg_audio, min=-1.0, max=1.0)
+        steg_audio = iwt(y_steg)
+        # 測試階段量化（論文 3.5 節）：round → clamp → 正規化回 [-1, 1]
+        steg_audio = torch.clamp(torch.round(32768.0 * steg_audio), -32768, 32767) / 32768.0
 
         output_path = "output_stego.wav"
         torchaudio.save(output_path, steg_audio.squeeze(0).cpu(), target_sr)
@@ -100,16 +88,12 @@ def extract_audio(stego_path, extract_vol, apply_filter):
     if not stego_path: return None, "請上傳檔案！"
     try:
         steg = load_and_preprocess(stego_path)
-        steg_d = steg
-        for _ in range(haar_levels):
-            steg_d = dwt(steg_d)
+        steg_d = dwt(steg)
         z_rand = torch.randn_like(steg_d)
         y_rev_in = torch.cat([steg_d, z_rand], dim=1)
         x_hat = net(y_rev_in, rev=True)
         secret_hat_d = x_hat.narrow(1, split_factor * channels_in, x_hat.shape[1] - split_factor * channels_in)
-        secret_hat_audio = secret_hat_d
-        for _ in range(haar_levels):
-            secret_hat_audio = iwt(secret_hat_audio)
+        secret_hat_audio = iwt(secret_hat_d)
 
         # 放大音量
         secret_hat_audio = secret_hat_audio * extract_vol

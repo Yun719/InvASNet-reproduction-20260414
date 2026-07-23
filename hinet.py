@@ -1,5 +1,23 @@
+
 import torch.nn as nn
+import config as c
 from invblock import INV_block
+
+# -------------------------------------------------------
+# 根據 config.haar_levels 動態決定每個 INV_block 的 channel 分割數
+#
+# 1D Haar DWT 每疊一次：C channels → 2C channels (low + high)
+# haar_levels 次後，cover_d / secret_d 各有 channels_in * 2^haar_levels 個 channel
+#
+# INV_block 以 harr=True 建立時：split_len = in_1 * 2
+# 因此：in_1 = channels_in * 2^haar_levels / 2 = channels_in * 2^(haar_levels-1)
+#
+# 例：haar_levels=1, channels_in=1 → _in=1, split_len=2  (原始架構)
+#     haar_levels=3, channels_in=1 → _in=4, split_len=8  (3次Haar)
+# -------------------------------------------------------
+_haar = getattr(c, "haar_levels", 1)
+_ch   = getattr(c, "channels_in", 1)
+_in   = _ch * (2 ** (_haar - 1))   # INV_block 的 in_1 / in_2 參數
 
 
 class Hinet(nn.Module):
@@ -7,23 +25,23 @@ class Hinet(nn.Module):
     def __init__(self):
         super(Hinet, self).__init__()
 
-        self.inv1 = INV_block()
-        self.inv2 = INV_block()
-        self.inv3 = INV_block()
-        self.inv4 = INV_block()
-        self.inv5 = INV_block()
-        self.inv6 = INV_block()
-        self.inv7 = INV_block()
-        self.inv8 = INV_block()
+        self.inv1  = INV_block(in_1=_in, in_2=_in)
+        self.inv2  = INV_block(in_1=_in, in_2=_in)
+        self.inv3  = INV_block(in_1=_in, in_2=_in)
+        self.inv4  = INV_block(in_1=_in, in_2=_in)
+        self.inv5  = INV_block(in_1=_in, in_2=_in)
+        self.inv6  = INV_block(in_1=_in, in_2=_in)
+        self.inv7  = INV_block(in_1=_in, in_2=_in)
+        self.inv8  = INV_block(in_1=_in, in_2=_in)
 
-        self.inv9 = INV_block()
-        self.inv10 = INV_block()
-        self.inv11 = INV_block()
-        self.inv12 = INV_block()
-        self.inv13 = INV_block()
-        self.inv14 = INV_block()
-        self.inv15 = INV_block()
-        self.inv16 = INV_block()
+        self.inv9  = INV_block(in_1=_in, in_2=_in)
+        self.inv10 = INV_block(in_1=_in, in_2=_in)
+        self.inv11 = INV_block(in_1=_in, in_2=_in)
+        self.inv12 = INV_block(in_1=_in, in_2=_in)
+        self.inv13 = INV_block(in_1=_in, in_2=_in)
+        self.inv14 = INV_block(in_1=_in, in_2=_in)
+        self.inv15 = INV_block(in_1=_in, in_2=_in)
+        self.inv16 = INV_block(in_1=_in, in_2=_in)
 
     def forward(self, x, rev=False):
 
@@ -66,5 +84,4 @@ class Hinet(nn.Module):
             out = self.inv1(out, rev=True)
 
         return out
-
 

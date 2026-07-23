@@ -163,16 +163,26 @@ def main():
     trained_epoch = int(getattr(c, "trained_epoch", 0))
     save_freq = int(getattr(c, "SAVE_freq", 50))
     val_freq = int(getattr(c, "val_freq", 50))
-    channels_in = int(getattr(c, "channels_in", 1))
+    channels_in          = int(getattr(c, "channels_in", 1))
+    haar_levels          = int(getattr(c, "haar_levels", 1))
+    quantize_simulation  = bool(getattr(c, "quantize_simulation", False))
+    if quantize_simulation:
+        print("[Train] 量化模擬已啟用（Quantization-Aware Training）")
+    else:
+        print("[Train] 量化模擬未啟用")
+
 
     lam_r = float(getattr(c, "lamda_reconstruction", 5.0))
     lam_g = float(getattr(c, "lamda_guide", 1.0))
     lam_l = float(getattr(c, "lamda_low_frequency", 1.0))
 
     # NOTE:
-    # 2D HiNet 用 4*channels_in（因為 2D Haar: LL/LH/HL/HH）
-    # 1D Haar 用 2*channels_in（因為 1D Haar: low/high）
-    split_factor = 2
+    # 1D Haar DWT 每疊一次：通道 ×2、長度 ÷2
+    # haar_levels 次後：每邊有 channels_in * 2^haar_levels 個 channel
+    # split_factor = 2^haar_levels（steg 側佔的 channel 數 / channels_in）
+    split_factor = 2 ** haar_levels
+
+    print(f"haar_levels：{haar_levels},split_factor:{split_factor}")
 
     print("=" * 80)
     print("Epoch    Loss        log10(lr)")
@@ -196,9 +206,11 @@ def main():
                 cover, secret = to_device_batch(batch, device)
 
 
-                # 1) DWT
-                cover_d = dwt(cover)     # (B, 2C, L/2)
-                secret_d = dwt(secret)   # (B, 2C, L/2)
+                # 1) DWT（haar_levels 次疊加）
+                cover_d, secret_d = cover, secret
+                for _ in range(haar_levels):
+                    cover_d  = dwt(cover_d)   # 每次：(B, C→2C, L→L/2)
+                    secret_d = dwt(secret_d)
                 check_finite("cover_d", cover_d)
                 check_finite("secret_d", secret_d)
 
@@ -212,33 +224,45 @@ def main():
                 y_steg = y.narrow(1, 0, split_factor * channels_in)  # (B, 2C, L/2)
                 y_z = y.narrow(1, split_factor * channels_in, y.shape[1] - split_factor * channels_in)
 
-                steg = iwt(y_steg)  # back to waveform (B, C, L)
+                steg = y_steg
+                for _ in range(haar_levels):
+                    steg = iwt(steg)   # 逐層還原回波形 (B, C, L)
                 check_finite("steg", steg)
 
-                # ✅ 新增：量化模擬（訓練階段用均勻噪聲）
-                # 1. 反正規化：假設 steg 在 [-1, 1]，映射到 16-bit 整數範圍
-                # 2. 加入均勻噪聲模擬量化誤差 n ~ U(-0.5, 0.5)
-                # 3. clamp 確保不超出 16-bit 範圍
-                # 4. 再除以 32768 正規化回 [-1, 1]，才能繼續送進網路
-                noise = torch.zeros_like(steg).uniform_(-0.5, 0.5)
-                steg_q = torch.clamp(32768.0 * steg + noise, -32768, 32767) / 32768.0
-                check_finite("steg_q", steg_q)    
+                # ✅ 量化模擬（由 config.quantize_simulation 控制）
+                # 模擬 16-bit WAV 儲存時的精度損失：
+                #   1. 映射到 [-32768, 32767] 整數範圍
+                #   2. 加入均勻量化噪聲 n ~ U(-0.5, 0.5)
+                #   3. clamp 後正規化回 [-1, 1]
+                #   4. 重新做 haar_levels 次 DWT 回頻域，再送進反向網路
+                if quantize_simulation:
+                    noise = torch.zeros_like(steg).uniform_(-0.5, 0.5)
+                    steg_q = torch.clamp(32768.0 * steg + noise, -32768, 32767) / 32768.0
+                    check_finite("steg_q", steg_q)
+                    y_steg_q = steg_q
+                    for _ in range(haar_levels):
+                        y_steg_q = dwt(y_steg_q)   # 量化後重新 DWT 回頻域
+                else:
+                    steg_q   = steg      # 無量化，steg_q 只是個別名供 g_loss 使用
+                    y_steg_q = y_steg    # 直接用原始頻域 tensor
 
                 # 4) backward (recover)
                 z_rand = gauss_noise_like(y_z)
-                y_steg_q = dwt(steg_q)                                   # ← 量化後再 DWT 回頻域
-                y_rev_in = torch.cat([y_steg_q, z_rand], dim=1)          # ← 用量化版本
+                y_rev_in = torch.cat([y_steg_q, z_rand], dim=1)
                 x_hat = net(y_rev_in, rev=True)
                 check_finite("x_hat", x_hat)
 
                 secret_hat_d = x_hat.narrow(
                     1, split_factor * channels_in, x_hat.shape[1] - split_factor * channels_in
                 )
-                secret_hat = iwt(secret_hat_d)
+                secret_hat = secret_hat_d
+                for _ in range(haar_levels):
+                    secret_hat = iwt(secret_hat)
                 check_finite("secret_hat", secret_hat)
 
                 # 5) losses (照原 HiNet 的三個 loss 形式搬過來)
-                g_loss = mse_loss_mean(steg_q, cover)                 # steg 要像 cover（波形域比較）
+                # 量化啟用時 g_loss 用 steg_q（讓網路學會抵抗量化誤差）
+                g_loss = mse_loss_mean(steg_q, cover)
                 r_loss = mse_loss_mean(secret_hat, secret)         # recover secret
                 steg_low = y_steg.narrow(1, 0, channels_in)         # 1D low band
                 cover_low = cover_d.narrow(1, 0, channels_in)
@@ -286,20 +310,24 @@ def main():
 
                     for batch in val_pbar:
                         cover, secret = to_device_batch(batch, device)
-                        cover_d = dwt(cover)
-                        secret_d = dwt(secret)
+                        cover_d, secret_d = cover, secret
+                        for _ in range(haar_levels):
+                            cover_d  = dwt(cover_d)
+                            secret_d = dwt(secret_d)
                         x = torch.cat([cover_d, secret_d], dim=1)
                         y = net(x, rev=False)
 
                         y_steg = y.narrow(1, 0, split_factor * channels_in)
                         y_z = y.narrow(1, split_factor * channels_in, y.shape[1] - split_factor * channels_in)
 
-                        steg = iwt(y_steg)
+                        steg = y_steg
+                        for _ in range(haar_levels):
+                            steg = iwt(steg)
                         z_rand = gauss_noise_like(y_z)
                         x_hat = net(torch.cat([y_steg, z_rand], dim=1), rev=True)
-                        secret_hat = iwt(
-                            x_hat.narrow(1, split_factor * channels_in, x_hat.shape[1] - split_factor * channels_in)
-                        )
+                        secret_hat = x_hat.narrow(1, split_factor * channels_in, x_hat.shape[1] - split_factor * channels_in)
+                        for _ in range(haar_levels):
+                            secret_hat = iwt(secret_hat)
 
                         g_loss = mse_loss_mean(steg, cover)
                         r_loss = mse_loss_mean(secret_hat, secret)

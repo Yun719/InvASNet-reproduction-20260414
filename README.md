@@ -27,6 +27,8 @@ audio_steganography_project/
 │
 └── app.py                       # 使用模型的 UI 使用者介面程式
 └── yt2wav - time.bat            # 用來從 Youtube 抓指定時間段下來的程式 (需要裝 FFmpeg 和 yt-dlp)
+│
+└── evaluate.py                  # 用來評估模型的程式
 ```
 # 隱藏相關
 
@@ -84,7 +86,24 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 pip install numpy scipy tqdm matplotlib tensorboardx soundfile gradio
 ```
 
+### 評估用套件（`evaluate.py` 需要）
 
+
+| 套件 | 用途 | 指標 |
+|------|------|------|
+| `pesq` | ITU-T P.862 語音品質評估 | PESQ |
+| `pystoi` | 短時客觀可懂度 | STOI |
+
+```bash
+pip install pesq pystoi
+```
+
+（以上套件 pesq 和 pystoi 需安裝 Visual Studio Build Tools）
+
+> **⚠️ 注意：ODG（PEAQ）**
+> ITU-R BS.1387 標準的完整 Python 實作目前沒有穩定的公開套件。
+> 目前策略是以 **SNR** 作為感知透明度的主要客觀指標，ODG 暫不納入自動評估流程。
+> 若需要 ODG，可使用 GstPEAQ（C語言工具，需另外編譯）離線計算。
 
 ---
 
@@ -96,6 +115,9 @@ pip install numpy scipy tqdm matplotlib tensorboardx soundfile gradio
 - **epochs**：訓練次數
 - **tain_next**：是否讀取上次的訓練進度
 - **progress_bar**：要不要顯示訓練的進度條
+- **harr_levels**：Haar Wavelet 轉換層數
+- **channels_in**：輸入通道數
+- **quantize_simulation**：要不要模擬量化
 
 ---
 
