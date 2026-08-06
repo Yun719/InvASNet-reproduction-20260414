@@ -7,3 +7,5 @@ model/
 *.zip
 .venv/
 runs/
+data-多的7000/
+data.zip

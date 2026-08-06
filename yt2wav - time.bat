@@ -19,6 +19,7 @@ yt-dlp ^
 -x ^
 --audio-format wav ^
 --download-sections "*%start_time%-%end_time%" ^
+--force-keyframes-at-cuts ^
 -o "%%(title)s.%%(ext)s" ^
 "%url%"
 

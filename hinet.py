@@ -15,33 +15,37 @@ from invblock import INV_block
 # 例：haar_levels=1, channels_in=1 → _in=1, split_len=2  (原始架構)
 #     haar_levels=3, channels_in=1 → _in=4, split_len=8  (3次Haar)
 # -------------------------------------------------------
-_haar = getattr(c, "haar_levels", 1)
-_ch   = getattr(c, "channels_in", 1)
-_in   = _ch * (2 ** (_haar - 1))   # INV_block 的 in_1 / in_2 參數
-
-
 class Hinet(nn.Module):
 
     def __init__(self):
         super(Hinet, self).__init__()
 
-        self.inv1  = INV_block(in_1=_in, in_2=_in)
-        self.inv2  = INV_block(in_1=_in, in_2=_in)
-        self.inv3  = INV_block(in_1=_in, in_2=_in)
-        self.inv4  = INV_block(in_1=_in, in_2=_in)
-        self.inv5  = INV_block(in_1=_in, in_2=_in)
-        self.inv6  = INV_block(in_1=_in, in_2=_in)
-        self.inv7  = INV_block(in_1=_in, in_2=_in)
-        self.inv8  = INV_block(in_1=_in, in_2=_in)
+        _haar        = int(getattr(c, "haar_levels",  1))
+        _ch          = int(getattr(c, "channels_in",  1))
+        _num_secrets = int(getattr(c, "num_secrets",  1))
 
-        self.inv9  = INV_block(in_1=_in, in_2=_in)
-        self.inv10 = INV_block(in_1=_in, in_2=_in)
-        self.inv11 = INV_block(in_1=_in, in_2=_in)
-        self.inv12 = INV_block(in_1=_in, in_2=_in)
-        self.inv13 = INV_block(in_1=_in, in_2=_in)
-        self.inv14 = INV_block(in_1=_in, in_2=_in)
-        self.inv15 = INV_block(in_1=_in, in_2=_in)
-        self.inv16 = INV_block(in_1=_in, in_2=_in)
+        # cover 側 per channel（harr=True: split_len = in_1 * 2）
+        _in_cover  = _ch * (2 ** (_haar - 1))
+        # secret 側 per channel（所有秘密的通道數合計再 / 2）
+        _in_secret = _ch * (2 ** (_haar - 1)) * _num_secrets
+
+        self.inv1  = INV_block(in_1=_in_cover, in_2=_in_secret)
+        self.inv2  = INV_block(in_1=_in_cover, in_2=_in_secret)
+        self.inv3  = INV_block(in_1=_in_cover, in_2=_in_secret)
+        self.inv4  = INV_block(in_1=_in_cover, in_2=_in_secret)
+        self.inv5  = INV_block(in_1=_in_cover, in_2=_in_secret)
+        self.inv6  = INV_block(in_1=_in_cover, in_2=_in_secret)
+        self.inv7  = INV_block(in_1=_in_cover, in_2=_in_secret)
+        self.inv8  = INV_block(in_1=_in_cover, in_2=_in_secret)
+
+        self.inv9  = INV_block(in_1=_in_cover, in_2=_in_secret)
+        self.inv10 = INV_block(in_1=_in_cover, in_2=_in_secret)
+        self.inv11 = INV_block(in_1=_in_cover, in_2=_in_secret)
+        self.inv12 = INV_block(in_1=_in_cover, in_2=_in_secret)
+        self.inv13 = INV_block(in_1=_in_cover, in_2=_in_secret)
+        self.inv14 = INV_block(in_1=_in_cover, in_2=_in_secret)
+        self.inv15 = INV_block(in_1=_in_cover, in_2=_in_secret)
+        self.inv16 = INV_block(in_1=_in_cover, in_2=_in_secret)
 
     def forward(self, x, rev=False):
 

@@ -35,6 +35,24 @@ def _list_wavs(folder: str):
     return sorted(glob.glob(os.path.join(folder, "*.wav")))
 
 
+def _rms_normalize(wav: torch.Tensor, target_rms: float) -> torch.Tensor:
+    """
+    將音訊正規化到指定的 RMS 響度。
+
+    Args
+        wav        : (C, L) tensor，値域 [-1, 1]
+        target_rms : 目標 RMS（建議 0.1，即 -20 dBFS）。0.0 表示不處理。
+    Returns
+        wav 經幅度縮放後的 tensor，clamp 到 [-1, 1]
+    """
+    if target_rms <= 0.0:
+        return wav
+    rms = wav.pow(2).mean().sqrt()
+    if rms < 1e-8:          # 靜音片段，跳過防止除以零
+        return wav
+    return torch.clamp(wav * (target_rms / rms), -1.0, 1.0)
+
+
 class InvASNetAudioPairDataset(Dataset):
     """
     Returns (cover(host_music), secret(speech)) as tensors:
@@ -45,47 +63,58 @@ class InvASNetAudioPairDataset(Dataset):
     """
     def __init__(self, mode: str = "train"):
         self.mode = mode
+        self.num_secrets = int(getattr(c, "num_secrets", 1))
         if mode == "train":
-            self.host_files = _list_wavs(getattr(c, "TRAIN_HOST_PATH", None))
-            self.secret_files = _list_wavs(getattr(c, "TRAIN_SECRET_PATH", None))
+            self.host_files    = _list_wavs(getattr(c, "TRAIN_HOST_PATH",    None))
+            self.secret_files  = _list_wavs(getattr(c, "TRAIN_SECRET_PATH",  None))
+            self.secret2_files = (_list_wavs(getattr(c, "TRAIN_SECRET2_PATH", None))
+                                  if self.num_secrets == 2 else [])
+            self.host_root     = getattr(c, "TRAIN_HOST_PATH",    "")
+            self.secret_root   = getattr(c, "TRAIN_SECRET_PATH",  "")
+            self.secret2_root  = getattr(c, "TRAIN_SECRET2_PATH", "")
         else:
-            self.host_files = _list_wavs(getattr(c, "VAL_HOST_PATH", None))
-            self.secret_files = _list_wavs(getattr(c, "VAL_SECRET_PATH", None))
-        if mode == "train":
-            self.host_root = c.TRAIN_HOST_PATH
-            self.secret_root = c.TRAIN_SECRET_PATH
-        else:
-            self.host_root = c.VAL_HOST_PATH
-            self.secret_root = c.VAL_SECRET_PATH
+            self.host_files    = _list_wavs(getattr(c, "VAL_HOST_PATH",    None))
+            self.secret_files  = _list_wavs(getattr(c, "VAL_SECRET_PATH",  None))
+            self.secret2_files = (_list_wavs(getattr(c, "VAL_SECRET2_PATH", None))
+                                  if self.num_secrets == 2 else [])
+            self.host_root     = getattr(c, "VAL_HOST_PATH",    "")
+            self.secret_root   = getattr(c, "VAL_SECRET_PATH",  "")
+            self.secret2_root  = getattr(c, "VAL_SECRET2_PATH", "")
 
-        self.seg_len = int(getattr(c, "segment_length", 44160))
+        self.seg_len  = int(getattr(c, "segment_length", 44160))
         self.channels = int(getattr(c, "channels_in", 1))
+        self.secret_target_rms = float(getattr(c, "secret_target_rms", 0.0))
+        if self.secret_target_rms > 0.0:
+            print(f"[Dataset/{mode}] secret RMS 正規化: target_rms={self.secret_target_rms:.3f} ({20*__import__('math').log10(self.secret_target_rms):.1f} dBFS)")
+        else:
+            print(f"[Dataset/{mode}] secret RMS 正規化: 關閉（保持原始音量）")
 
-        # 如果發現找不到檔案，它會自動開啟「合成模式 (_make_synth)」，自己用數學公式產生出類似「嗶——」的假聲音（正弦波 + 雜音）來代替
-        self.use_synth = (len(self.host_files) == 0) or (len(self.secret_files) == 0)
+        # 如果發現找不到檔案，它會自動開啟「合成模式 (_make_synth)」
+        need_files = [self.host_files, self.secret_files]
+        if self.num_secrets == 2:
+            need_files.append(self.secret2_files)
+        self.use_synth = any(len(f) == 0 for f in need_files)
 
-        # For real audio mode later, we will require 1-to-1 pairing by index.
-        self.n_pairs = min(len(self.host_files), len(self.secret_files)) if not self.use_synth else 1000000
-        #print("[DEBUG] host_files[0] =", self.host_files[0])
+        self.n_pairs = (min(len(f) for f in need_files)
+                        if not self.use_synth else 1_000_000)
 
     def __len__(self):
         return self.n_pairs
 
     def _make_synth(self):
-        # Simple synthetic signals: (1, L)
-        # cover: low-amplitude noise + slow sine
-        noted = torch.randn(self.channels, self.seg_len) * 0.02
+        # Simple synthetic signals: (channels, L)
         t = torch.linspace(0, 1, self.seg_len).unsqueeze(0).repeat(self.channels, 1)
-        cover = noted + 0.05 * torch.sin(2 * torch.pi * 220.0 * t)
-
-        # secret: slightly different sine + noise
-        secret = (torch.randn(self.channels, self.seg_len) * 0.02 +
-                  0.05 * torch.sin(2 * torch.pi * 440.0 * t))
-
-        # clamp to [-1, 1] like normalized audio
-        cover = torch.clamp(cover, -1.0, 1.0)
-        secret = torch.clamp(secret, -1.0, 1.0)
-        return cover, secret
+        cover   = torch.randn(self.channels, self.seg_len) * 0.02 + 0.05 * torch.sin(2 * torch.pi * 220.0 * t)
+        secret1 = torch.randn(self.channels, self.seg_len) * 0.02 + 0.05 * torch.sin(2 * torch.pi * 440.0 * t)
+        cover   = torch.clamp(cover,   -1.0, 1.0)
+        secret1 = torch.clamp(secret1, -1.0, 1.0)
+        secret1 = _rms_normalize(secret1, self.secret_target_rms)   # 將合成 secret 正規化
+        if self.num_secrets == 2:
+            secret2 = torch.randn(self.channels, self.seg_len) * 0.02 + 0.05 * torch.sin(2 * torch.pi * 880.0 * t)
+            secret2 = torch.clamp(secret2, -1.0, 1.0)
+            secret2 = _rms_normalize(secret2, self.secret_target_rms)
+            return cover, secret1, secret2
+        return cover, secret1
 
     def __getitem__(self, idx):
         if self.use_synth:
@@ -119,19 +148,25 @@ class InvASNetAudioPairDataset(Dataset):
             return wav
 
         # 在 __getitem__(self, idx) 裡用：
-        host_item = self.host_files[idx % len(self.host_files)]
+        host_item   = self.host_files[idx % len(self.host_files)]
         secret_item = self.secret_files[idx % len(self.secret_files)]
 
-        # 如果 item 本身已經是完整/可用路徑，就直接用；不然才 join 資料夾
-        host_path = host_item if os.path.exists(host_item) else os.path.join(self.host_root, host_item)
+        host_path   = host_item   if os.path.exists(host_item)   else os.path.join(self.host_root,   host_item)
         secret_path = secret_item if os.path.exists(secret_item) else os.path.join(self.secret_root, secret_item)
 
+        cover   = _load_wav_mono_44k(host_path,   target_sr=c.host_sr, target_len=c.segment_length)
+        secret1 = _load_wav_mono_44k(secret_path, target_sr=c.host_sr, target_len=c.segment_length)
+        secret1 = _rms_normalize(secret1, self.secret_target_rms)   # 將 secret 正規化到目標 RMS
 
+        if self.num_secrets == 2:
+            secret2_item = self.secret2_files[idx % len(self.secret2_files)]
+            secret2_path = (secret2_item if os.path.exists(secret2_item)
+                            else os.path.join(self.secret2_root, secret2_item))
+            secret2 = _load_wav_mono_44k(secret2_path, target_sr=c.host_sr, target_len=c.segment_length)
+            secret2 = _rms_normalize(secret2, self.secret_target_rms)
+            return cover, secret1, secret2
 
-        cover = _load_wav_mono_44k(host_path, target_sr=c.host_sr, target_len=c.segment_length)
-        secret = _load_wav_mono_44k(secret_path, target_sr=c.host_sr, target_len=c.segment_length)
-
-        return cover, secret
+        return cover, secret1
     
 
 # DataLoaders
