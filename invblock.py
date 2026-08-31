@@ -4,8 +4,6 @@ import torch.nn as nn
 import config as c
 from rrdb_denselayer_1d import ResidualDenseBlock_out_1D
 
-
-
 class INV_block(nn.Module):
     def __init__(self, subnet_constructor=ResidualDenseBlock_out_1D, clamp=c.clamp, harr=True, in_1=1, in_2=1):
         super().__init__()
@@ -45,4 +43,3 @@ class INV_block(nn.Module):
             y1 = (x1 - t2)
 
         return torch.cat((y1, y2), 1)
-

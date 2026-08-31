@@ -110,8 +110,7 @@ class PsychoacousticLoss(nn.Module):
         Returns
             M           : (N, F)       每個頻率 bin 的遮蔽門限（線性振幅）
         """
-        # norm='forward' → FFT 輸出除以 N，使振幅尺度與時域信號相當
-        fft_c = torch.fft.rfft(cover_frame * self.window, n=self.n_fft, norm="forward")
+        fft_c = torch.fft.rfft(cover_frame * self.window, n=self.n_fft)
         mag_c = torch.abs(fft_c)                                    # (N, F)
 
         # ── 頻率擴散函數（Spreading Function）────────────────────────────────
@@ -127,7 +126,7 @@ class PsychoacousticLoss(nn.Module):
         mag_smooth = torch.exp(log_mag_smooth)                     # 回到線性域
 
         # 全域遮蔽門限 = α × 擴散後 cover 頻譜 + 人耳絕對聽閾
-        M = self.alpha * mag_smooth + self.T_abs.unsqueeze(0)      # (N, F)
+        M = self.alpha * mag_smooth + (self.T_abs.unsqueeze(0) * self.n_fft)      # (N, F)
         return M
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -163,9 +162,9 @@ class PsychoacousticLoss(nn.Module):
             s_frame = stego_flat[:, start:end]   # (N, n_fft)
             c_frame = cover_flat[:, start:end]   # (N, n_fft)
 
-            # ── FFT ──────────────────────────────────────────────────────────
-            fft_s = torch.fft.rfft(s_frame * self.window, n=n_fft, norm="forward")
-            fft_c = torch.fft.rfft(c_frame * self.window, n=n_fft, norm="forward")
+            # ── FFT（取消 norm="forward"，避免數值除以 4096 後趨近於零）───────
+            fft_s = torch.fft.rfft(s_frame * self.window, n=n_fft)
+            fft_c = torch.fft.rfft(c_frame * self.window, n=n_fft)
 
             # 複數頻譜差的模（同時考慮振幅差與相位差）
             diff = torch.abs(fft_s - fft_c)                        # (N, F)
@@ -173,10 +172,9 @@ class PsychoacousticLoss(nn.Module):
             # ── 遮蔽門限 ─────────────────────────────────────────────────────
             M = self._masking_threshold(c_frame)                    # (N, F)
 
-            # ── Hinge Loss（只懲罰超出門限的感知失真）───────────────────────
-            # max(0, diff[k] - M[k]) → 低於門限 = 0（感知透明）
+            # ── Hinge Loss（採用 L1 超額，避免平方讓極小微量消失）────────────
             excess = torch.relu(diff - M)                           # (N, F)
-            frame_losses.append(excess.pow(2).mean())
+            frame_losses.append((excess / n_fft).mean())
 
         # 對所有分析幀取平均
         if not frame_losses:

@@ -4,6 +4,21 @@ import torchaudio
 import torchaudio.functional as F
 import gradio as gr
 
+try:
+    from scipy.signal import butter, sosfilt
+    _HAS_SCIPY = True
+except ImportError:
+    _HAS_SCIPY = False
+    print("[警告] scipy 未安裝，Butterworth 濾波器將降級為 biquad")
+
+try:
+    import noisereduce as nr
+    import numpy as np
+    _HAS_NR = True
+except ImportError:
+    _HAS_NR = False
+    print("[警告] noisereduce 未安裝，頻譜閘控將降級為 biquad。可執行: pip install noisereduce")
+
 import config as c
 from model import Model
 from modules.dwt1d import DWT1D, IWT1D
@@ -79,10 +94,12 @@ def load_and_preprocess(audio_path, target_length=None):
 # 3. 核心功能
 # ==========================================
 @torch.no_grad()
-def hide_audio(cover_path, secret1_path, secret_vol, secret2_path=None):
+def hide_audio(cover_path, cover_vol, secret1_path, secret_vol, secret2_path=None):
     if not cover_path or not secret1_path: return None, "請上傳檔案！"
     try:
         cover   = load_and_preprocess(cover_path)
+        # Host 音量微調倍率（預設 1.0 = 不額外調整）
+        cover   = cover * cover_vol
         secret1 = load_and_preprocess(secret1_path, target_length=cover.shape[2])
 
         # ① 先做自動 RMS 正規化（訓練/推理一致）
@@ -122,13 +139,13 @@ def hide_audio(cover_path, secret1_path, secret_vol, secret2_path=None):
         output_path = "output_stego.wav"
         torchaudio.save(output_path, steg_audio.squeeze(0).cpu(), target_sr)
         rms_info = f"RMS正規化={secret_target_rms}" if secret_target_rms > 0 else "未正規化"
-        return output_path, f"✅ 隱寫成功！({rms_info}, 微調={secret_vol}倍)"
+        return output_path, f"✅ 隱寫成功！({rms_info}, Host倍率={cover_vol}, Secret微調={secret_vol}倍)"
     except Exception as e:
         return None, f"❌ 發生錯誤: {str(e)}"
 
 
 @torch.no_grad()
-def extract_audio(stego_path, extract_vol, apply_filter):
+def extract_audio(stego_path, extract_vol, filter_mode, stft_quantile):
     if not stego_path: return None, None, "請上傳檔案！"
     try:
         steg = load_and_preprocess(stego_path)
@@ -149,9 +166,64 @@ def extract_audio(stego_path, extract_vol, apply_filter):
 
         def postprocess(audio):
             audio = audio * extract_vol
-            if apply_filter:
+
+            if filter_mode == "無濾波":
+                # 不做任何濾波處理
+                pass
+
+            elif filter_mode == "Biquad 帶通（原始）":
+                # 原始方案：biquad 一階 IIR，300–3400 Hz 電話頻帶
                 audio = F.highpass_biquad(audio, target_sr, 300.0)
                 audio = F.lowpass_biquad(audio,  target_sr, 3400.0)
+
+            elif filter_mode == "Butterworth 帶通（scipy）":
+                # 8 階 Butterworth，滾降更陡，頻率外雜訊壓制更徹底
+                if _HAS_SCIPY:
+                    a_np = audio.squeeze().cpu().float().numpy()
+                    sos = butter(N=8, Wn=[300, min(8000, target_sr // 2 - 1)],
+                                 btype='bandpass', fs=target_sr, output='sos')
+                    a_np = sosfilt(sos, a_np)
+                    audio = torch.tensor(a_np, dtype=audio.dtype, device=audio.device)
+                    audio = audio.unsqueeze(0).unsqueeze(0)
+                else:
+                    print("[降級] scipy 未安裝，改用 biquad")
+                    audio = F.highpass_biquad(audio, target_sr, 300.0)
+                    audio = F.lowpass_biquad(audio,  target_sr, 3400.0)
+
+            elif filter_mode == "STFT 頻譜減法（無依賴）":
+                # 純 torch：對頻域低能量 bin 做軟式閘控抑制
+                wav = audio.squeeze()          # (L,)
+                n_fft = 1024
+                stft = torch.stft(wav, n_fft=n_fft, hop_length=256,
+                                  win_length=n_fft,
+                                  window=torch.hann_window(n_fft, device=device),
+                                  return_complex=True)   # (F, T)
+                magnitude = stft.abs()
+                # 用第 70 百分位作為門限：抑制能量最低的 70% bin，保留最強的 30%。
+                # 原本 median×0.5 太寬鬆（門限低於中位數），幾乎沒有過濾效果。
+                threshold = magnitude.flatten().quantile(float(stft_quantile))
+                mask = torch.clamp((magnitude - threshold) / (threshold + 1e-8), 0.0, 1.0)
+                stft_denoised = stft * mask
+                wav_out = torch.istft(stft_denoised, n_fft=n_fft, hop_length=256,
+                                      win_length=n_fft,
+                                      window=torch.hann_window(n_fft, device=device),
+                                      length=wav.shape[0])
+                audio = wav_out.unsqueeze(0).unsqueeze(0)
+
+            elif filter_mode == "Spectral Gating（noisereduce）":
+                # 使用 noisereduce：估算雜訊底板並在頻域做自適應減法
+                if _HAS_NR:
+                    a_np = audio.squeeze().cpu().float().numpy()
+                    a_np = nr.reduce_noise(y=a_np, sr=target_sr, stationary=False,
+                                           prop_decrease=0.8)
+                    audio = torch.tensor(a_np, dtype=audio.dtype, device=audio.device)
+                    audio = audio.unsqueeze(0).unsqueeze(0)
+                    print("CIallo~")
+                else:
+                    print("[降級] noisereduce 未安裝，改用 biquad。請執行: pip install noisereduce")
+                    audio = F.highpass_biquad(audio, target_sr, 300.0)
+                    audio = F.lowpass_biquad(audio,  target_sr, 3400.0)
+
             return torch.clamp(audio, min=-1.0, max=1.0)
 
         if num_secrets == 2:
@@ -167,7 +239,7 @@ def extract_audio(stego_path, extract_vol, apply_filter):
             out2 = "output_recovered_secret2.wav"
             torchaudio.save(out1, secret1_hat.squeeze(0).cpu(), target_sr)
             torchaudio.save(out2, secret2_hat.squeeze(0).cpu(), target_sr)
-            msg = "✅ 提取成功！兩段秘密音訊已還原" + (" (已啟用人聲降噪濾波器)" if apply_filter else "")
+            msg = f"✅ 提取成功！兩段秘密音訊已還原 (濾波: {filter_mode})"
             return out1, out2, msg
         else:
             secret1_hat = secret_hat_all
@@ -176,7 +248,7 @@ def extract_audio(stego_path, extract_vol, apply_filter):
             secret1_hat = postprocess(secret1_hat)
             out1 = "output_recovered_secret.wav"
             torchaudio.save(out1, secret1_hat.squeeze(0).cpu(), target_sr)
-            msg = "✅ 提取成功！" + (" (已啟用人聲增強濾波器)" if apply_filter else " (未啟用濾波)")
+            msg = f"✅ 提取成功！(濾波模式: {filter_mode})"
             return out1, None, msg
     except Exception as e:
         return None, None, f"❌ 發生錯誤: {str(e)}"
@@ -195,6 +267,8 @@ with gr.Blocks(title="InvASNet 隱寫測試平台") as app:
             with gr.Row():
                 with gr.Column():
                     in_cover   = gr.Audio(label="Host 音樂 (Cover)",                  type="filepath")
+                    cover_vol  = gr.Slider(minimum=0.1, maximum=3.0, value=1.0, step=0.01,
+                                           label="🎵 Host 音量微調倍率 (1.0=不額外調整)")
                     in_secret  = gr.Audio(label="Secret 音樂 1",                        type="filepath")
                     in_secret2 = gr.Audio(label="Secret 音樂 2 (num_secrets=2 時使用)",
                                           type="filepath", visible=(num_secrets == 2))
@@ -206,7 +280,7 @@ with gr.Blocks(title="InvASNet 隱寫測試平台") as app:
                     out_hide_msg = gr.Textbox(label="系統訊息", interactive=False)
             btn_hide.click(
                 fn=hide_audio,
-                inputs=[in_cover, in_secret, secret_vol, in_secret2],
+                inputs=[in_cover, cover_vol, in_secret, secret_vol, in_secret2],
                 outputs=[out_stego, out_hide_msg]
             )
 
@@ -216,16 +290,41 @@ with gr.Blocks(title="InvASNet 隱寫測試平台") as app:
                     in_stego     = gr.Audio(label="Stego 音樂 (含秘密)", type="filepath")
                     extract_vol  = gr.Slider(minimum=1.0, maximum=20.0, value=5.0, step=1.0,
                                              label="📢 提取後放大倍率 (建議 5)")
-                    apply_filter = gr.Checkbox(label="🎧 啟用人聲增強濾波器 (去除高低頻雜音)", value=True)
+                    _nr_note = "" if _HAS_NR else " ⚠️(需 pip install noisereduce)"
+                    _sc_note = "" if _HAS_SCIPY else " ⚠️(需 pip install scipy)"
+                    filter_mode  = gr.Dropdown(
+                        choices=[
+                            "無濾波",
+                            "Biquad 帶通（原始）",
+                            f"Butterworth 帶通（scipy）{_sc_note}",
+                            "STFT 頻譜減法（無依賴）",
+                            f"Spectral Gating（noisereduce）{_nr_note}",
+                        ],
+                        value="STFT 頻譜減法（無依賴）",
+                        label="🎚️ 降噪濾波模式",
+                        info="Butterworth > STFT > Biquad，noisereduce 效果最佳但需額外安裝"
+                    )
+                    stft_quantile = gr.Slider(
+                        minimum=0.10, maximum=0.99, value=0.70, step=0.01,
+                        label="🔢 STFT 門限百分位 (quantile)",
+                        info="押制能量最低的 N% bin。大=更強力過濾，不這模式則此滾桿無效。",
+                        visible=True   # 初始顯示，切換模式時動態隔藏
+                    )
                     btn_extract  = gr.Button("開始提取 (Extract)", variant="primary")
                 with gr.Column():
                     out_recovered  = gr.Audio(label="解碼出的 Secret 音樂 1", type="filepath")
                     out_recovered2 = gr.Audio(label="解碼出的 Secret 音樂 2",
                                               type="filepath", visible=(num_secrets == 2))
                     out_extract_msg = gr.Textbox(label="系統訊息", interactive=False)
+            # 切換濾波模式時，動態顯示/隔藏 STFT quantile slider
+            filter_mode.change(
+                fn=lambda m: gr.update(visible=(m == "STFT 頻譜減法（無依賴）")),
+                inputs=[filter_mode],
+                outputs=[stft_quantile],
+            )
             btn_extract.click(
                 fn=extract_audio,
-                inputs=[in_stego, extract_vol, apply_filter],
+                inputs=[in_stego, extract_vol, filter_mode, stft_quantile],
                 outputs=[out_recovered, out_recovered2, out_extract_msg]
             )
 

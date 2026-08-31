@@ -12,6 +12,7 @@ import os
 print("[RUNNING FILE]", os.path.abspath(__file__))
 
 import os
+import csv
 import math
 import warnings
 import numpy as np
@@ -103,6 +104,52 @@ def check_finite(name, t: torch.Tensor):
 
 
 # -----------------------------
+# Loss CSV Logger
+# -----------------------------
+class LossCSVLogger:
+    """
+    逐 epoch 把 loss 記錄到 CSV。
+    支援中途中斷、隔天再續：
+      - CSV 以 append 模式開啟，新訓練直接接在尾巴。
+      - 若檔案不存在，自動寫入 header。
+      - 若檔案已存在，跳過 header，直接接在已有記錄後面。
+    """
+    COLUMNS = ["epoch", "total_loss", "g_loss", "r_loss", "l_loss", "psy_loss", "val_loss", "lr"]
+
+    def __init__(self, csv_path: str):
+        self.csv_path = csv_path
+        file_exists = os.path.exists(csv_path) and os.path.getsize(csv_path) > 0
+        self._f = open(csv_path, "a", newline="", encoding="utf-8", buffering=1)  # line-buffered
+        self._writer = csv.DictWriter(self._f, fieldnames=self.COLUMNS)
+        if not file_exists:
+            self._writer.writeheader()
+            print(f"[LossLog] 新建記錄檔：{csv_path}")
+        else:
+            print(f"[LossLog] 接續寫入現有記錄：{csv_path}")
+
+    def write_epoch(self, epoch: int, total: float, g: float, r: float,
+                    l: float, psy: float, lr: float,
+                    val_loss: float = float("nan")):
+        self._writer.writerow({
+            "epoch":      epoch,
+            "total_loss": round(total, 8),
+            "g_loss":     round(g, 8),
+            "r_loss":     round(r, 8),
+            "l_loss":     round(l, 8),
+            "psy_loss":   round(psy, 8),
+            "val_loss":   "nan" if (val_loss != val_loss) else round(val_loss, 8),  # nan check
+            "lr":         lr,
+        })
+        self._f.flush()  # 確保中斷時不會少寫入任何記錄
+
+    def close(self):
+        try:
+            self._f.close()
+        except Exception:
+            pass
+
+
+# -----------------------------
 # Main
 # -----------------------------
 def main():
@@ -114,6 +161,10 @@ def main():
     # Ensure output dirs (用 config 裡的路徑；若你改成 Windows 路徑也 OK)
     model_dir = getattr(c, "MODEL_PATH", "./checkpoints/")
     ensure_dir(model_dir)
+
+    # 初始化 Loss CSV Logger
+    log_csv_path = getattr(c, "LOSS_LOG_PATH", "./loss_log.csv")
+    loss_logger  = LossCSVLogger(log_csv_path)
 
     # tensorboard
     writer = None
@@ -340,11 +391,16 @@ def main():
             r_avg   = float(np.mean(r_list))   if r_list   else float("nan")
             l_avg   = float(np.mean(l_list))   if l_list   else float("nan")
             psy_avg = float(np.mean(psy_list)) if psy_list else float("nan")
+
+            w_r   = lam_r * r_avg
+            w_g   = lam_g * g_avg
+            w_l   = lam_l * l_avg
+            w_psy = lam_psy * psy_avg
+
             print(
-                f"Epoch {i_epoch:04d} | "
-                f"Total={epoch_loss:.6f} | "
-                f"r={r_avg:.6f}  g={g_avg:.6f}  l={l_avg:.6f}  psy={psy_avg:.3e} | "
-                f"log10(lr)={lr_log10:.4f}"
+                f"Epoch {i_epoch:04d} | Total={epoch_loss:.6f} | "
+                f"w_r={w_r:.6f}  w_g={w_g:.6f}  w_l={w_l:.6f}  w_psy={w_psy:.6f} | "
+                f"raw_psy={psy_avg:.3e}"
             )
 
             # viz / tensorboard
@@ -358,6 +414,7 @@ def main():
                     "psy_loss": float(np.mean(psy_list)) if psy_list else 0.0,
                 }, i_epoch)
 
+            epoch_val_loss = float("nan")
             # simple val (可先關掉省時間)
             if val_freq > 0 and (i_epoch % val_freq == 0):
                 net.eval()
@@ -421,6 +478,26 @@ def main():
                         # 🌟 讓進度條旁邊即時顯示考試的 Loss 🌟
                         val_pbar.set_postfix({"Loss": f"{total.item():.6f}"})
 
+                    # 計算平均 val loss 並記錄
+                    if vloss:
+                        epoch_val_loss = float(np.mean(vloss))
+                        print(f"  ✔ Val Epoch {i_epoch:04d} | val_loss={epoch_val_loss:.6f}")
+                        if writer is not None:
+                            writer.add_scalars("Val", {"Loss": epoch_val_loss}, i_epoch)
+
+            # 將本 epoch 結果寫入 CSV（append 模式，支援中斷再續）
+            current_lr = optimizer.param_groups[0]["lr"]
+            loss_logger.write_epoch(
+                epoch = i_epoch,
+                total = epoch_loss,
+                g     = g_avg,
+                r     = r_avg,
+                l     = l_avg,
+                psy   = psy_avg,
+                lr    = current_lr,
+                val_loss = epoch_val_loss,
+            )
+
             # save
             if save_freq > 0 and (i_epoch % save_freq == 0):
                 save_path = os.path.join(model_dir, f"model_checkpoint_{i_epoch:05d}.pt")
@@ -447,6 +524,7 @@ def main():
     finally:
         if writer is not None:
             writer.close()
+        loss_logger.close()
         #viz.signal_stop()
 
 

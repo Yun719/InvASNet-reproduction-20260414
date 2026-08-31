@@ -20,6 +20,7 @@ audio_steganography_project/
 ├── hinet.py                     # 🚇 可逆網路主幹：16 道關卡的雙向隧道 (串接所有 INV_block)
 ├── invblock.py                  # 🪄 核心代數魔法：仿射耦合層，計算加減乘除以實現完美可逆
 ├── rrdb_denselayer_1d.py        # 🧑‍🍳 更新函數黑盒子：產生轉換係數的 1D 卷積神經網路 (可以換成 U-Net)
+└── psychoacoustic_loss.py       # 心理聲學感知損失模組化程式
 │
 ├── README.md                    # 專案說明檔 (記錄怎麼啟動程式、修改了哪些架構)
 │
@@ -30,6 +31,9 @@ audio_steganography_project/
 │
 └── evaluate.py                  # 用來評估模型的程式
 ```
+
+---
+
 # 隱藏相關
 
 ## 如何跑 app.py？
@@ -47,8 +51,10 @@ audio_steganography_project/
 >需要自行建立 `data/` 資料夾，再將訓練用資料放入，請參考**架構**建置資料夾
 
 + 載體音樂：[GTZAN Genre Collection](https://www.kaggle.com/datasets/carlthome/gtzan-genre-collection)
++ 或是選擇：[FMA - small](https://www.kaggle.com/datasets/imsparsh/fma-free-music-archive-small-medium)
+  + FMA 檔案較大，GTZAN 較冰量化，FMA 選擇 small 版本即可
 + 隱藏語音：[LibriSpeech](https://www.openslr.org/12)
-  + 選擇 `dev-clean.tar.gz` 
+  + 選擇 `train-clean-100.tar` 
 + 在 windows 環境下，在檔案總管的搜尋欄輸入 `*.flac` 可以一次找到資料夾下（包含子資料夾）的 `*.flac` 檔案
 
 ### 轉換格式
@@ -118,6 +124,10 @@ pip install pesq pystoi
 - **harr_levels**：Haar Wavelet 轉換層數
 - **channels_in**：輸入通道數
 - **quantize_simulation**：要不要模擬量化
+- **secret_target_rms**：將輸入秘密正規化到統一響度
+- **lamda_psy**：心理聲學感知損失權重
+- **psy_alpha**：心理聲學感知損失遮蔽比例，越小門限越嚴格
+- **num_secrets**：要藏幾筆秘密進去 
 
 ---
 
