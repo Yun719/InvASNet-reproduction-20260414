@@ -55,6 +55,48 @@ def mse_loss_mean(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return nn.MSELoss(reduction="mean")(a, b)
 
 
+def log_mag_stft_loss(
+    steg: torch.Tensor,
+    cover: torch.Tensor,
+    n_fft: int = 1024,
+    hop_length: int = 256,
+) -> torch.Tensor:
+    """
+    Log-Magnitude Spectrogram MSE（感知對齊版 guide loss）。
+
+    在 STFT 頻譜的對數振幅域計算 steg 與 cover 的差異：
+        L_spec = MSE( log(|STFT(steg)| + ε),  log(|STFT(cover)| + ε) )
+
+    優點：
+      - 對相位偏移不懲罰（人耳本來就對相位不敏感）
+      - log 壓縮動態範圍，讓低能量頻段也有貢獻（模擬人耳等響度曲線）
+      - 直接在頻率域比較，比時域 MSE 更接近感知透明度
+
+    Args
+        steg, cover : (B, C, L)  時域 tensor（已 IWT 還原）
+        n_fft       : STFT 每幀 FFT 點數
+        hop_length  : STFT hop length
+    Returns
+        loss : scalar Tensor
+    """
+    B, C, L = steg.shape
+    window = torch.hann_window(n_fft, device=steg.device, dtype=steg.dtype)
+    # 展平 batch/channel → (B*C, L)
+    s_flat = steg.reshape(B * C, L)
+    c_flat = cover.reshape(B * C, L)
+
+    stft_s = torch.stft(s_flat, n_fft=n_fft, hop_length=hop_length,
+                        window=window, return_complex=True)   # (BC, F, T)
+    stft_c = torch.stft(c_flat, n_fft=n_fft, hop_length=hop_length,
+                        window=window, return_complex=True)
+
+    mag_s = torch.sqrt(stft_s.real**2 + stft_s.imag**2 + 1e-7)
+    mag_c = torch.sqrt(stft_c.real**2 + stft_c.imag**2 + 1e-7)
+    log_s = torch.log(mag_s)
+    log_c = torch.log(mag_c)
+    return nn.functional.mse_loss(log_s, log_c)
+
+
 def get_parameter_number(net):
     total_num = sum(p.numel() for p in net.parameters())
     trainable_num = sum(p.numel() for p in net.parameters() if p.requires_grad)
@@ -244,6 +286,18 @@ def main():
     lam_psy = float(getattr(c, "lamda_psy", 0.0))   # 0.0 則完全關閉心理聲學損失
     print(f"[Train] lam_r={lam_r}, lam_g={lam_g}, lam_l={lam_l}, lam_psy={lam_psy}")
 
+    # guide loss 類型（g_loss 用哪種計算方式）
+    guide_loss_type = str(getattr(c, "guide_loss_type", "mse")).lower()
+    log_spec_n_fft  = int(getattr(c, "log_spec_n_fft",  1024))
+    log_spec_hop    = int(getattr(c, "log_spec_hop",     256))
+    if guide_loss_type == "log_spec":
+        def guide_loss_fn(a, b):
+            return log_mag_stft_loss(a, b, n_fft=log_spec_n_fft, hop_length=log_spec_hop)
+        print(f"[Train] guide_loss=log_spec  n_fft={log_spec_n_fft}, hop={log_spec_hop}")
+    else:
+        guide_loss_fn = mse_loss_mean
+        print(f"[Train] guide_loss=mse（時域 MSE）")
+
     # NOTE:
     # 1D Haar DWT 每疊一次：通道 ×2、長度 ÷2
     # haar_levels 次後：每邊有 channels_in * 2^haar_levels 個 channel
@@ -350,7 +404,9 @@ def main():
 
                 # 5) losses (照原 HiNet 的三個 loss 形式搞過來)
                 # 量化啟用時 g_loss 用 steg_q（讓網路學會抗拗量化誤差）
-                g_loss = mse_loss_mean(steg_q, cover)
+                # 量化啟用時 g_loss 用 steg_q；log_spec 模式同樣支援
+                g_loss = guide_loss_fn(steg_q, cover)
+                check_finite("g_loss", g_loss)
                 if num_secrets == 2:
                     r_loss = mse_loss_mean(secret1_hat, secret1) + mse_loss_mean(secret2_hat, secret2)
                 else:
@@ -464,7 +520,7 @@ def main():
                             for _ in range(haar_levels):
                                 secret1_hat = iwt(secret1_hat)
 
-                        g_loss = mse_loss_mean(steg, cover)
+                        g_loss = guide_loss_fn(steg, cover)
                         if num_secrets == 2:
                             r_loss = mse_loss_mean(secret1_hat, secret1) + mse_loss_mean(secret2_hat, secret2)
                         else:

@@ -19,6 +19,24 @@ except ImportError:
     _HAS_NR = False
     print("[警告] noisereduce 未安裝，頻譜閘控將降級為 biquad。可執行: pip install noisereduce")
 
+# ---- Whisper ASR 後端偵測 ----------------------------------------
+try:
+    from faster_whisper import WhisperModel as FasterWhisperModel
+    _WHISPER_BACKEND = "faster-whisper"
+    print("[ASR] 使用後端: faster-whisper")
+except ImportError:
+    FasterWhisperModel = None
+    try:
+        import whisper as _openai_whisper
+        _WHISPER_BACKEND = "openai-whisper"
+        print("[ASR] 使用後端: openai-whisper")
+    except ImportError:
+        _openai_whisper = None
+        _WHISPER_BACKEND = None
+        print("[警告] 未安裝任何 Whisper 套件，語音辨識功能不可用。"
+              "可執行: pip install faster-whisper")
+# -----------------------------------------------------------------
+
 import config as c
 from model import Model
 from modules.dwt1d import DWT1D, IWT1D
@@ -255,6 +273,66 @@ def extract_audio(stego_path, extract_vol, filter_mode, stft_quantile):
 
 
 # ==========================================
+# 5. Whisper 語音辨識
+# ==========================================
+_whisper_cache: dict = {}  # {(backend, model_size, device_str): model_instance}
+
+def transcribe_audio(audio_path, model_size: str, language: str) -> str:
+    """
+    對指定音訊檔進行語音辨識並回傳文字。
+    audio_path : 音訊檔路徑（字串）
+    model_size : tiny / base / small / medium / large
+    language   : auto / zh / en / ja / ko …
+    """
+    if _WHISPER_BACKEND is None:
+        return "❌ 未安裝 Whisper 套件，請執行: pip install faster-whisper"
+    if not audio_path or not os.path.exists(str(audio_path)):
+        return "⚠️ 尚無可辨識的音訊，請先執行提取（Extract）"
+
+    lang = None if language == "auto" else language
+    cache_key = (_WHISPER_BACKEND, model_size, str(device))
+
+    try:
+        if _WHISPER_BACKEND == "faster-whisper":
+            if cache_key not in _whisper_cache:
+                print(f"[ASR] 載入 faster-whisper 模型: {model_size}")
+                compute = "float16" if torch.cuda.is_available() else "int8"
+                _whisper_cache[cache_key] = FasterWhisperModel(
+                    model_size,
+                    device="cuda" if torch.cuda.is_available() else "cpu",
+                    compute_type=compute,
+                )
+            model = _whisper_cache[cache_key]
+            segments, info = model.transcribe(
+                str(audio_path),
+                language=lang,
+                beam_size=5,
+            )
+            detected_lang = info.language
+            text = "".join(seg.text for seg in segments).strip()
+            return f"🌐 偵測語言: {detected_lang}\n\n📝 辨識結果:\n{text if text else '（無法辨識出有效文字）'}"
+
+        else:  # openai-whisper
+            if cache_key not in _whisper_cache:
+                print(f"[ASR] 載入 openai-whisper 模型: {model_size}")
+                _whisper_cache[cache_key] = _openai_whisper.load_model(
+                    model_size,
+                    device=str(device),
+                )
+            model = _whisper_cache[cache_key]
+            result = model.transcribe(
+                str(audio_path),
+                language=lang,
+            )
+            detected_lang = result.get("language", "unknown")
+            text = result.get("text", "").strip()
+            return f"🌐 偵測語言: {detected_lang}\n\n📝 辨識結果:\n{text if text else '（無法辨識出有效文字）'}"
+
+    except Exception as e:
+        return f"❌ 辨識失敗: {str(e)}"
+
+
+# ==========================================
 # 4. Gradio 介面
 # ==========================================
 _mode_label = f"{'\u96d9\u79d8\u5bc6\u6a21\u5f0f' if num_secrets == 2 else '\u55ae\u79d8\u5bc6\u6a21\u5f0f'} (num_secrets={num_secrets})"
@@ -308,15 +386,64 @@ with gr.Blocks(title="InvASNet 隱寫測試平台") as app:
                         minimum=0.10, maximum=0.99, value=0.70, step=0.01,
                         label="🔢 STFT 門限百分位 (quantile)",
                         info="押制能量最低的 N% bin。大=更強力過濾，不這模式則此滾桿無效。",
-                        visible=True   # 初始顯示，切換模式時動態隔藏
+                        visible=True   # 初始顯示，切換模式時動態隱藏
                     )
                     btn_extract  = gr.Button("開始提取 (Extract)", variant="primary")
+
+                    gr.Markdown("---")
+                    gr.Markdown("### 🗣️ Whisper 語音辨識設定")
+                    _whisper_note = "" if _WHISPER_BACKEND else " ⚠️(需 pip install faster-whisper)"
+                    whisper_model = gr.Dropdown(
+                        choices=["tiny", "base", "small", "medium", "large"],
+                        value="small",
+                        label=f"Whisper 模型大小{_whisper_note}",
+                        info="tiny/base=快, small=平衡(推薦), medium/large=最準但慢",
+                        interactive=(_WHISPER_BACKEND is not None),
+                    )
+                    whisper_lang = gr.Dropdown(
+                        choices=["auto", "zh", "en", "ja", "ko", "fr", "de", "es"],
+                        value="auto",
+                        label="辨識語言",
+                        info="auto = Whisper 自動偵測",
+                        interactive=(_WHISPER_BACKEND is not None),
+                    )
+
                 with gr.Column():
                     out_recovered  = gr.Audio(label="解碼出的 Secret 音樂 1", type="filepath")
-                    out_recovered2 = gr.Audio(label="解碼出的 Secret 音樂 2",
-                                              type="filepath", visible=(num_secrets == 2))
+                    btn_transcribe1 = gr.Button(
+                        "🗣️ 辨識 Secret 1",
+                        variant="secondary",
+                        interactive=(_WHISPER_BACKEND is not None),
+                    )
+                    whisper_out1 = gr.Textbox(
+                        label="📝 Secret 1 辨識結果",
+                        interactive=False,
+                        lines=4,
+                        placeholder="請先提取音訊，再點擊辨識按鈕…",
+                    )
+
+                    out_recovered2 = gr.Audio(
+                        label="解碼出的 Secret 音樂 2",
+                        type="filepath",
+                        visible=(num_secrets == 2),
+                    )
+                    btn_transcribe2 = gr.Button(
+                        "🗣️ 辨識 Secret 2",
+                        variant="secondary",
+                        visible=(num_secrets == 2),
+                        interactive=(_WHISPER_BACKEND is not None),
+                    )
+                    whisper_out2 = gr.Textbox(
+                        label="📝 Secret 2 辨識結果",
+                        interactive=False,
+                        lines=4,
+                        visible=(num_secrets == 2),
+                        placeholder="請先提取音訊，再點擊辨識按鈕…",
+                    )
+
                     out_extract_msg = gr.Textbox(label="系統訊息", interactive=False)
-            # 切換濾波模式時，動態顯示/隔藏 STFT quantile slider
+
+            # 切換濾波模式時，動態顯示/隱藏 STFT quantile slider
             filter_mode.change(
                 fn=lambda m: gr.update(visible=(m == "STFT 頻譜減法（無依賴）")),
                 inputs=[filter_mode],
@@ -326,6 +453,17 @@ with gr.Blocks(title="InvASNet 隱寫測試平台") as app:
                 fn=extract_audio,
                 inputs=[in_stego, extract_vol, filter_mode, stft_quantile],
                 outputs=[out_recovered, out_recovered2, out_extract_msg]
+            )
+            # Whisper 辨識按鈕綁定
+            btn_transcribe1.click(
+                fn=transcribe_audio,
+                inputs=[out_recovered, whisper_model, whisper_lang],
+                outputs=[whisper_out1],
+            )
+            btn_transcribe2.click(
+                fn=transcribe_audio,
+                inputs=[out_recovered2, whisper_model, whisper_lang],
+                outputs=[whisper_out2],
             )
 
 if __name__ == "__main__":
