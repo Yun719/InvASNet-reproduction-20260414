@@ -47,30 +47,54 @@ from modules.dwt1d import DWT1D, IWT1D
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(f"[Gradio] 使用裝置: {device}")
 
-net = Model().to(device)
 dwt = DWT1D().to(device)
 iwt = IWT1D().to(device)
-
-model_path = os.path.join(getattr(c, "MODEL_PATH", "./model/"), "model.pt")
-if os.path.exists(model_path):
-    state = torch.load(model_path, map_location=device)
-    net_state = {k.replace('module.', ''): v for k, v in state.get("net", {}).items()}
-    net.load_state_dict(net_state, strict=False)
-    print(f"[Gradio] 成功載入模型權重: {model_path}")
-else:
-    print(f"[警告] 找不到模型檔 {model_path}，將使用隨機權重（僅供測試介面）")
-
-net.eval()
 
 channels_in         = int(getattr(c, "channels_in", 1))
 haar_levels         = int(getattr(c, "haar_levels", 1))
 quantize_simulation = bool(getattr(c, "quantize_simulation", False))
-num_secrets         = int(getattr(c, "num_secrets", 1))
+num_secrets         = int(getattr(c, "num_secrets", 1))   # config 預設值（作為 UI 初始選擇）
 split_factor        = 2 ** haar_levels
 target_sr           = getattr(c, "host_sr", 44100)
-secret_target_rms   = float(getattr(c, "secret_target_rms", 0.0))   # 嵌入前 RMS 正規化目標
-print(f"[App] 量化模擬: {'ON' if quantize_simulation else 'OFF'}, haar_levels: {haar_levels}, num_secrets: {num_secrets}")
+secret_target_rms   = float(getattr(c, "secret_target_rms", 0.0))
+
+_model_dir = getattr(c, "MODEL_PATH", "./model/")
+
+def _load_model(ns: int):
+    """建立並載入 num_secrets=ns 的模型。
+    模型檔命名規則：
+      ns=1 → model_ns1.pt（或備用 model.pt）
+      ns=2 → model_ns2.pt（或備用 model.pt）
+    """
+    _orig_ns = c.num_secrets          # 暫存原始值
+    c.num_secrets = ns                # patch，讓 Hinet.__init__ 讀到正確的 ns
+    model = Model().to(device)
+    c.num_secrets = _orig_ns          # 還原，避免影響其他地方
+
+    # 優先讀 model_ns{N}.pt，找不到再 fallback 到 model.pt
+    primary  = os.path.join(_model_dir, f"model_ns{ns}.pt")
+    fallback = os.path.join(_model_dir, "model.pt")
+    path = primary if os.path.exists(primary) else (fallback if os.path.exists(fallback) else None)
+
+    if path:
+        state = torch.load(path, map_location=device)
+        net_state = {k.replace('module.', ''): v for k, v in state.get("net", {}).items()}
+        model.load_state_dict(net_state, strict=False)
+        print(f"[Model ns={ns}] 載入: {path}")
+    else:
+        print(f"[Model ns={ns}] ⚠️ 找不到 {primary}，使用隨機權重（僅供測試）")
+
+    model.eval()
+    return model
+
+# 啟動時同時建立兩個模型（架構不同，不共用權重）
+nets = {
+    1: _load_model(1),
+    2: _load_model(2),
+}
+print(f"[App] 量化模擬: {'ON' if quantize_simulation else 'OFF'}, haar_levels: {haar_levels}")
 print(f"[App] secret RMS 正規化: {secret_target_rms if secret_target_rms > 0 else '關閉'}")
+print(f"[App] 已載入雙模型 (ns=1 / ns=2)，Radio 切換時自動選擇對應模型")
 
 
 # ==========================================
@@ -112,7 +136,9 @@ def load_and_preprocess(audio_path, target_length=None):
 # 3. 核心功能
 # ==========================================
 @torch.no_grad()
-def hide_audio(cover_path, cover_vol, secret1_path, secret_vol, secret2_path=None):
+def hide_audio(cover_path, cover_vol, secret1_path, secret_vol, secret2_path, num_sec):
+    """num_sec: 1 或 2，由 UI Radio 傳入，取代全域 num_secrets"""
+    num_sec = int(num_sec)
     if not cover_path or not secret1_path: return None, "請上傳檔案！"
     try:
         cover   = load_and_preprocess(cover_path)
@@ -130,12 +156,12 @@ def hide_audio(cover_path, cover_vol, secret1_path, secret_vol, secret2_path=Non
             cover_d   = dwt(cover_d)
             secret1_d = dwt(secret1_d)
 
-        if num_secrets == 2:
+        if num_sec == 2:
             if not secret2_path:
-                return None, "❌ num_secrets=2 但未上傳第二個秘密音訊！"
+                return None, "❌ 雙秘密模式但未上傳 Secret 2！"
             secret2 = load_and_preprocess(secret2_path, target_length=cover.shape[2])
-            secret2 = _rms_normalize(secret2, secret_target_rms)   # 自動正規化
-            secret2 = secret2 * secret_vol                          # 微調倍率
+            secret2 = _rms_normalize(secret2, secret_target_rms)
+            secret2 = secret2 * secret_vol
             secret2_d = secret2
             for _ in range(haar_levels):
                 secret2_d = dwt(secret2_d)
@@ -143,12 +169,11 @@ def hide_audio(cover_path, cover_vol, secret1_path, secret_vol, secret2_path=Non
         else:
             x = torch.cat([cover_d, secret1_d], dim=1)
 
-        y      = net(x, rev=False)
+        y      = nets[num_sec](x, rev=False)
         y_steg = y.narrow(1, 0, split_factor * channels_in)
         steg_audio = y_steg
         for _ in range(haar_levels):
             steg_audio = iwt(steg_audio)
-        # 量化模擬（由 config.quantize_simulation 控制）
         if quantize_simulation:
             steg_audio = torch.clamp(torch.round(32768.0 * steg_audio), -32768, 32767) / 32768.0
         else:
@@ -157,13 +182,16 @@ def hide_audio(cover_path, cover_vol, secret1_path, secret_vol, secret2_path=Non
         output_path = "output_stego.wav"
         torchaudio.save(output_path, steg_audio.squeeze(0).cpu(), target_sr)
         rms_info = f"RMS正規化={secret_target_rms}" if secret_target_rms > 0 else "未正規化"
-        return output_path, f"✅ 隱寫成功！({rms_info}, Host倍率={cover_vol}, Secret微調={secret_vol}倍)"
+        mode_info = f"{'雙' if num_sec == 2 else '單'}秘密模式"
+        return output_path, f"✅ 隱寫成功！({mode_info}, {rms_info}, Host倍率={cover_vol}, Secret微調={secret_vol}倍)"
     except Exception as e:
-        return None, f"❌ 發生錯誤: {str(e)}"
+        return None, f"❌ 發生錯誤: {str(e)}\n⚠️ 請確認已載入與秘密數量（{num_sec}）對應的模型"
 
 
 @torch.no_grad()
-def extract_audio(stego_path, extract_vol, filter_mode, stft_quantile):
+def extract_audio(stego_path, extract_vol, filter_mode, stft_quantile, num_sec):
+    """num_sec: 1 或 2，由 UI Radio 傳入，取代全域 num_secrets"""
+    num_sec = int(num_sec)
     if not stego_path: return None, None, "請上傳檔案！"
     try:
         steg = load_and_preprocess(stego_path)
@@ -171,14 +199,13 @@ def extract_audio(stego_path, extract_vol, filter_mode, stft_quantile):
         for _ in range(haar_levels):
             steg_d = dwt(steg_d)
 
-        # z_rand 必須與訓練時的 y_z 通道數相同
-        # y_z 通道數 = split_factor * channels_in * num_secrets
-        z_ch   = split_factor * channels_in * num_secrets
+        # z_rand 通道數 = split_factor * channels_in * num_sec
+        z_ch   = split_factor * channels_in * num_sec
         z_rand = torch.randn(steg_d.shape[0], z_ch, steg_d.shape[2],
                              device=device, dtype=steg_d.dtype)
 
         y_rev_in = torch.cat([steg_d, z_rand], dim=1)
-        x_hat    = net(y_rev_in, rev=True)
+        x_hat    = nets[num_sec](y_rev_in, rev=True)
         secret_hat_all = x_hat.narrow(1, split_factor * channels_in,
                                        x_hat.shape[1] - split_factor * channels_in)
 
@@ -244,7 +271,7 @@ def extract_audio(stego_path, extract_vol, filter_mode, stft_quantile):
 
             return torch.clamp(audio, min=-1.0, max=1.0)
 
-        if num_secrets == 2:
+        if num_sec == 2:
             half        = secret_hat_all.shape[1] // 2
             secret1_hat = secret_hat_all.narrow(1, 0, half)
             secret2_hat = secret_hat_all.narrow(1, half, half)
@@ -269,7 +296,7 @@ def extract_audio(stego_path, extract_vol, filter_mode, stft_quantile):
             msg = f"✅ 提取成功！(濾波模式: {filter_mode})"
             return out1, None, msg
     except Exception as e:
-        return None, None, f"❌ 發生錯誤: {str(e)}"
+        return None, None, f"❌ 發生錯誤: {str(e)}\n⚠️ 請確認已載入與秘密數量（{num_sec}）對應的模型"
 
 
 # ==========================================
@@ -335,21 +362,35 @@ def transcribe_audio(audio_path, model_size: str, language: str) -> str:
 # ==========================================
 # 4. Gradio 介面
 # ==========================================
-_mode_label = f"{'\u96d9\u79d8\u5bc6\u6a21\u5f0f' if num_secrets == 2 else '\u55ae\u79d8\u5bc6\u6a21\u5f0f'} (num_secrets={num_secrets})"
+_init_num_sec = num_secrets  # 以 config 值作為初始選擇
+
+# 切換秘密數量時，同步更新所有 Secret 2 相關元件
+def _update_secret2_visibility(num_sec):
+    show = (int(num_sec) == 2)
+    return (gr.update(visible=show),) * 5  # in_secret2, out_recovered2, btn_transcribe2, whisper_out2, (hide_tab label placeholder)
 
 with gr.Blocks(title="InvASNet 隱寫測試平台") as app:
-    gr.Markdown(f"# 🎵 InvASNet 音訊隱寫術測試平台\n### {_mode_label}")
+    gr.Markdown("# 🎵 InvASNet 音訊隱寫術測試平台")
+
+    # ── 全域秘密數量開關 ──────────────────────────────────────
+    num_sec_radio = gr.Radio(
+        choices=[1, 2],
+        value=_init_num_sec,
+        label="🔢 秘密數量模式",
+        info="⚠️ 必須與載入的模型訓練時的 num_secrets 一致，切換後若維度不符會報錯",
+    )
+    # ─────────────────────────────────────────────────────────
 
     with gr.Tabs():
         with gr.TabItem("🔒 藏入音樂 (Hide)"):
             with gr.Row():
                 with gr.Column():
-                    in_cover   = gr.Audio(label="Host 音樂 (Cover)",                  type="filepath")
+                    in_cover   = gr.Audio(label="Host 音樂 (Cover)", type="filepath")
                     cover_vol  = gr.Slider(minimum=0.1, maximum=3.0, value=1.0, step=0.01,
                                            label="🎵 Host 音量微調倍率 (1.0=不額外調整)")
-                    in_secret  = gr.Audio(label="Secret 音樂 1",                        type="filepath")
-                    in_secret2 = gr.Audio(label="Secret 音樂 2 (num_secrets=2 時使用)",
-                                          type="filepath", visible=(num_secrets == 2))
+                    in_secret  = gr.Audio(label="Secret 音樂 1", type="filepath")
+                    in_secret2 = gr.Audio(label="Secret 音樂 2",
+                                          type="filepath", visible=(_init_num_sec == 2))
                     secret_vol = gr.Slider(minimum=0.1, maximum=3.0, value=1.0, step=0.01,
                                            label=f"🎧 秘密音量微調倍率 (已自動 RMS={secret_target_rms if secret_target_rms>0 else '未啟用'}, 1.0=不額外調整)")
                     btn_hide   = gr.Button("開始隱寫 (Hide)", variant="primary")
@@ -358,7 +399,7 @@ with gr.Blocks(title="InvASNet 隱寫測試平台") as app:
                     out_hide_msg = gr.Textbox(label="系統訊息", interactive=False)
             btn_hide.click(
                 fn=hide_audio,
-                inputs=[in_cover, cover_vol, in_secret, secret_vol, in_secret2],
+                inputs=[in_cover, cover_vol, in_secret, secret_vol, in_secret2, num_sec_radio],
                 outputs=[out_stego, out_hide_msg]
             )
 
@@ -380,7 +421,7 @@ with gr.Blocks(title="InvASNet 隱寫測試平台") as app:
                         ],
                         value="STFT 頻譜減法（無依賴）",
                         label="🎚️ 降噪濾波模式",
-                        info="Butterworth > STFT > Biquad，noisereduce 效果最佳但需額外安裝"
+                        info=""
                     )
                     stft_quantile = gr.Slider(
                         minimum=0.10, maximum=0.99, value=0.70, step=0.01,
@@ -425,19 +466,19 @@ with gr.Blocks(title="InvASNet 隱寫測試平台") as app:
                     out_recovered2 = gr.Audio(
                         label="解碼出的 Secret 音樂 2",
                         type="filepath",
-                        visible=(num_secrets == 2),
+                        visible=(_init_num_sec == 2),
                     )
                     btn_transcribe2 = gr.Button(
                         "🗣️ 辨識 Secret 2",
                         variant="secondary",
-                        visible=(num_secrets == 2),
+                        visible=(_init_num_sec == 2),
                         interactive=(_WHISPER_BACKEND is not None),
                     )
                     whisper_out2 = gr.Textbox(
                         label="📝 Secret 2 辨識結果",
                         interactive=False,
                         lines=4,
-                        visible=(num_secrets == 2),
+                        visible=(_init_num_sec == 2),
                         placeholder="請先提取音訊，再點擊辨識按鈕…",
                     )
 
@@ -451,7 +492,7 @@ with gr.Blocks(title="InvASNet 隱寫測試平台") as app:
             )
             btn_extract.click(
                 fn=extract_audio,
-                inputs=[in_stego, extract_vol, filter_mode, stft_quantile],
+                inputs=[in_stego, extract_vol, filter_mode, stft_quantile, num_sec_radio],
                 outputs=[out_recovered, out_recovered2, out_extract_msg]
             )
             # Whisper 辨識按鈕綁定
@@ -465,6 +506,13 @@ with gr.Blocks(title="InvASNet 隱寫測試平台") as app:
                 inputs=[out_recovered2, whisper_model, whisper_lang],
                 outputs=[whisper_out2],
             )
+
+    # ── Radio 切換：同步顯示/隱藏 Secret 2 相關元件 ────────────
+    num_sec_radio.change(
+        fn=_update_secret2_visibility,
+        inputs=[num_sec_radio],
+        outputs=[in_secret2, out_recovered2, btn_transcribe2, whisper_out2],
+    )
 
 if __name__ == "__main__":
     app.launch(server_name="127.0.0.1", server_port=7860, share=False)
