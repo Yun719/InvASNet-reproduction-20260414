@@ -65,18 +65,33 @@ def load_csv(csv_path: str) -> dict:
 # 移動平均
 # ─────────────────────────────────────────────
 def moving_avg(arr: list, w: int) -> np.ndarray:
-    """對 arr 做寬度為 w 的中心移動平均（兩端用邊界值填補）。"""
+    """對 arr 做寬度為 w 的移動平均，支援稀疏 nan（先線性插值，平滑後還原 nan）。"""
     a = np.array(arr, dtype=float)
-    if w <= 1 or len(a) < w:
+    if w <= 1:
         return a
-    kernel = np.ones(w) / w
-    # 使用 'same' 模式，兩端以最近有效值補齊
-    pad = w // 2
-    a_pad = np.concatenate([np.full(pad, a[~np.isnan(a)][0] if not np.all(np.isnan(a)) else 0),
-                             a,
-                             np.full(pad, a[~np.isnan(a)][-1] if not np.all(np.isnan(a)) else 0)])
-    smoothed = np.convolve(a_pad, kernel, mode="valid")
-    return smoothed[:len(a)]
+    valid_mask = ~np.isnan(a)
+    if valid_mask.sum() == 0:
+        return a  # 全是 nan，直接回傳
+
+    # 線性插值填補 nan（只用於計算平滑，不改變原始 nan 位置）
+    x = np.arange(len(a))
+    a_filled = np.interp(x, x[valid_mask], a[valid_mask])
+
+    if len(a_filled) < w:
+        smoothed = a_filled
+    else:
+        kernel = np.ones(w) / w
+        pad = w // 2
+        a_pad = np.concatenate([
+            np.full(pad, a_filled[0]),
+            a_filled,
+            np.full(pad, a_filled[-1])
+        ])
+        smoothed = np.convolve(a_pad, kernel, mode="valid")[:len(a)]
+
+    # 原本是 nan 的位置恢復 nan（稀疏欄位的 nan 不應被插值掩蓋）
+    smoothed[~valid_mask] = np.nan
+    return smoothed
 
 
 # ─────────────────────────────────────────────
@@ -113,14 +128,25 @@ def plot(data: dict, smooth_w: int, out_path: str):
 
     for i, (col, title, color, ylabel) in enumerate(available):
         ax = axes[i // cols_per_row][i % cols_per_row]
-        raw = np.array(data[col])
+        raw = np.array(data[col], dtype=float)
         sm  = moving_avg(data[col], smooth_w)
+        valid_mask = ~np.isnan(raw)
+        is_sparse = valid_mask.sum() < len(raw) * 0.6  # 超過 40% 是 nan 視為稀疏
 
-        # 原始曲線（半透明）
-        ax.plot(epochs, raw, color=color, alpha=0.25, linewidth=0.8, label="raw")
-        # 平滑曲線
-        ax.plot(epochs, sm,  color=color, alpha=0.95, linewidth=1.8,
-                label=f"smoothed (w={smooth_w})")
+        if is_sparse:
+            # 稀疏欄位（如 val_loss）：原始用散點，平滑用有效段折線
+            ax.scatter(epochs[valid_mask], raw[valid_mask],
+                       color=color, alpha=0.6, s=25, zorder=3, label="raw (validation)")
+            # 平滑曲線只繪製非 nan 段（用 masked array）
+            sm_masked = np.ma.array(sm, mask=np.isnan(sm))
+            ax.plot(epochs, sm_masked, color=color, alpha=0.95, linewidth=1.8,
+                    label=f"smoothed (w={smooth_w})")
+        else:
+            # 密集欄位：正常折線圖
+            ax.plot(epochs, raw, color=color, alpha=0.25, linewidth=0.8, label="raw")
+            sm_masked = np.ma.array(sm, mask=np.isnan(sm))
+            ax.plot(epochs, sm_masked, color=color, alpha=0.95, linewidth=1.8,
+                    label=f"smoothed (w={smooth_w})")
 
         ax.set_title(title, fontsize=11, fontweight="bold")
         ax.set_xlabel("Epoch")

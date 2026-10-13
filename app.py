@@ -12,6 +12,20 @@ except ImportError:
     print("[警告] scipy 未安裝，Butterworth 濾波器將降級為 biquad")
 
 try:
+    from pesq import pesq as pesq_score
+    _HAS_PESQ = True
+except ImportError:
+    _HAS_PESQ = False
+    print("[警告] pesq 未安裝，PESQ 指標不可用。可執行: pip install pesq")
+
+try:
+    from pystoi import stoi as stoi_score
+    _HAS_STOI = True
+except ImportError:
+    _HAS_STOI = False
+    print("[警告] pystoi 未安裝，STOI 指標不可用。可執行: pip install pystoi")
+
+try:
     import noisereduce as nr
     import numpy as np
     _HAS_NR = True
@@ -300,6 +314,131 @@ def extract_audio(stego_path, extract_vol, filter_mode, stft_quantile, num_sec):
 
 
 # ==========================================
+# 4-b. 評估指標計算
+# ==========================================
+try:
+    import numpy as np  # noqa: F811 — 確保 np 在未安裝 noisereduce 時仍可用
+except ImportError:
+    pass  # 若連 numpy 都沒裝，後續 metrics 函式會在 except 中回報錯誤
+
+def _load_mono_np(audio_path, resample_sr=None):
+    """載入音訊並回傳 numpy float32 array（mono）與實際取樣率。"""
+    wav, sr = torchaudio.load(audio_path)
+    if wav.shape[0] > 1:
+        wav = wav.mean(dim=0, keepdim=True)
+    if resample_sr is not None and sr != resample_sr:
+        wav = torchaudio.functional.resample(wav, sr, resample_sr)
+        sr = resample_sr
+    return wav.squeeze().cpu().float().numpy(), int(sr)
+
+
+def _snr_db(ref: "np.ndarray", deg: "np.ndarray") -> float:
+    """計算 SNR（dB），ref 為原始、deg 為含噪版。長度不同時截短對齊。"""
+    n = min(len(ref), len(deg))
+    ref, deg = ref[:n], deg[:n]
+    noise = ref - deg
+    signal_power = np.mean(ref ** 2)
+    noise_power  = np.mean(noise ** 2)
+    if noise_power < 1e-12:
+        return float("inf")
+    return float(10 * np.log10(signal_power / noise_power))
+
+
+def compute_cover_metrics(cover_path, stego_path):
+    """
+    載體隱蔽性：Cover vs Stego
+    指標：SNR（PESQ/STOI 不適用於音樂，故不計算）
+    回傳 Markdown 格式字串。
+    """
+    if not cover_path or not stego_path:
+        return "⚠️ 請先完成「藏入」步驟，並確認 Cover 和 Stego 音訊皆已產生。"
+    try:
+        cover_np, sr = _load_mono_np(cover_path)
+        stego_np, _  = _load_mono_np(stego_path, resample_sr=sr)
+        snr = _snr_db(cover_np, stego_np)
+
+        md  = "## 🎵 載體隱蔽性：Cover vs Stego\n\n"
+        md += "| 指標 | 數值 | 說明 |\n"
+        md += "|------|------|------|\n"
+        snr_str = f"{snr:.2f} dB" if not np.isinf(snr) else "∞ dB（完全相同）"
+        md += f"| **SNR** | {snr_str} | 訊噪比，越高代表隱寫失真越小 |\n"
+        md += "\n> **說明：** PESQ 和 STOI 是基於人類發聲器官建立的語音專用指標，"
+        md += "套用於多樂器音樂在方法學上不正確，故載體品質僅以 SNR 評估。"
+        return md
+    except Exception as e:
+        return f"❌ 計算失敗: {str(e)}"
+
+
+def compute_secret_metrics(secret_path, recovered_path):
+    """
+    語音還原性：原始 Secret vs 還原 Secret
+    指標：SNR + PESQ + STOI
+    回傳 Markdown 格式字串。
+    """
+    if not secret_path or not recovered_path:
+        return "⚠️ 請先完成「提取」步驟，並確認 Secret 和 Recovered 音訊皆已產生。"
+    try:
+        # PESQ 要求 8000 或 16000 Hz，統一 resample 到 16000
+        PESQ_SR = 16000
+        ref_np, sr_orig = _load_mono_np(secret_path)
+        deg_np, _       = _load_mono_np(recovered_path, resample_sr=sr_orig)
+
+        snr = _snr_db(ref_np, deg_np)
+
+        ref_16k = torchaudio.functional.resample(
+            torch.tensor(ref_np).unsqueeze(0), sr_orig, PESQ_SR
+        ).squeeze().numpy()
+        deg_16k = torchaudio.functional.resample(
+            torch.tensor(deg_np).unsqueeze(0), sr_orig, PESQ_SR
+        ).squeeze().numpy()
+
+        # 對齊長度
+        n = min(len(ref_16k), len(deg_16k))
+        ref_16k, deg_16k = ref_16k[:n], deg_16k[:n]
+
+        pesq_val = None
+        stoi_val = None
+
+        if _HAS_PESQ:
+            try:
+                pesq_val = pesq_score(PESQ_SR, ref_16k, deg_16k, 'wb')
+            except Exception as pe:
+                pesq_val = f"錯誤: {pe}"
+
+        if _HAS_STOI:
+            try:
+                stoi_val = stoi_score(ref_16k, deg_16k, PESQ_SR, extended=False)
+            except Exception as se:
+                stoi_val = f"錯誤: {se}"
+
+        md  = "## 🗣️ 語音還原性：原始 Secret vs 還原 Secret\n\n"
+        md += "| 指標 | 數值 | 說明 |\n"
+        md += "|------|------|------|\n"
+        snr_str = f"{snr:.2f} dB" if not np.isinf(snr) else "∞ dB"
+        md += f"| **SNR** | {snr_str} | 波形能量誤差，越高越好 |\n"
+
+        if pesq_val is None:
+            md += "| **PESQ** | ⚠️ 未安裝 pesq 套件 | `pip install pesq` |\n"
+        elif isinstance(pesq_val, str):
+            md += f"| **PESQ** | ⚠️ {pesq_val} | — |\n"
+        else:
+            md += f"| **PESQ** | {pesq_val:.3f} | 感知語音品質，>3.5 為優秀 |\n"
+
+        if stoi_val is None:
+            md += "| **STOI** | ⚠️ 未安裝 pystoi 套件 | `pip install pystoi` |\n"
+        elif isinstance(stoi_val, str):
+            md += f"| **STOI** | ⚠️ {stoi_val} | — |\n"
+        else:
+            md += f"| **STOI** | {stoi_val:.4f} | 語音可懂度 0~1，>0.93 為優秀 |\n"
+
+        md += "\n> **說明：** PESQ 與 STOI 為語音評估標準指標（ITU-T P.862 / IEEE），"
+        md += "已重採樣至 16 kHz 進行計算。"
+        return md
+    except Exception as e:
+        return f"❌ 計算失敗: {str(e)}"
+
+
+# ==========================================
 # 5. Whisper 語音辨識
 # ==========================================
 _whisper_cache: dict = {}  # {(backend, model_size, device_str): model_instance}
@@ -369,8 +508,8 @@ def _update_secret2_visibility(num_sec):
     show = (int(num_sec) == 2)
     return (gr.update(visible=show),) * 5  # in_secret2, out_recovered2, btn_transcribe2, whisper_out2, (hide_tab label placeholder)
 
-with gr.Blocks(title="InvASNet 隱寫測試平台") as app:
-    gr.Markdown("# 🎵 InvASNet 音訊隱寫術測試平台")
+with gr.Blocks(title="隱寫測試平台") as app:
+    gr.Markdown("# 音訊隱寫術測試平台")
 
     # ── 全域秘密數量開關 ──────────────────────────────────────
     num_sec_radio = gr.Radio(
@@ -397,11 +536,7 @@ with gr.Blocks(title="InvASNet 隱寫測試平台") as app:
                 with gr.Column():
                     out_stego    = gr.Audio(label="Stego 音樂 (含秘密)", type="filepath")
                     out_hide_msg = gr.Textbox(label="系統訊息", interactive=False)
-            btn_hide.click(
-                fn=hide_audio,
-                inputs=[in_cover, cover_vol, in_secret, secret_vol, in_secret2, num_sec_radio],
-                outputs=[out_stego, out_hide_msg]
-            )
+
 
         with gr.TabItem("🔓 提取秘密 (Extract)"):
             with gr.Row():
@@ -490,11 +625,7 @@ with gr.Blocks(title="InvASNet 隱寫測試平台") as app:
                 inputs=[filter_mode],
                 outputs=[stft_quantile],
             )
-            btn_extract.click(
-                fn=extract_audio,
-                inputs=[in_stego, extract_vol, filter_mode, stft_quantile, num_sec_radio],
-                outputs=[out_recovered, out_recovered2, out_extract_msg]
-            )
+
             # Whisper 辨識按鈕綁定
             btn_transcribe1.click(
                 fn=transcribe_audio,
@@ -507,6 +638,66 @@ with gr.Blocks(title="InvASNet 隱寫測試平台") as app:
                 outputs=[whisper_out2],
             )
 
+        with gr.TabItem("📊 評估指標 (Metrics)"):
+            gr.Markdown(
+                """
+### 📐 關於指標選擇
+- **Cover vs Stego（載體隱蔽性）** → 僅使用 **SNR**　
+  PESQ 和 STOI 是基於人類聲道先驗建立的語音專用指標，套用於多樂器音樂在方法學上不正確。
+- **Secret vs Recovered（語音還原性）** → 使用 **SNR + PESQ + STOI**　
+
+> ✅ 指標會在「藏入」和「提取」完成後自動計算，也可手動點擊下方按鈕重算。
+"""
+            )
+            with gr.Row():
+                with gr.Column():
+                    gr.Markdown("#### 🎵 載體隱蔽性：Cover vs Stego")
+                    gr.Markdown(
+                        "資料源：「藏入」 Tab 的 **Host Cover** 和 **Stego 音訊**，完成後自動計算。"
+                    )
+                    btn_calc_cover = gr.Button("🔄 重新計算 Cover 指標", variant="secondary")
+                    cover_metrics_out = gr.Markdown("請先完成「藏入」步驟…")
+
+                with gr.Column():
+                    gr.Markdown("#### 🗣️ 語音還原性：Secret vs Recovered")
+                    gr.Markdown(
+                        "資料源：「藏入」 Tab 的 **Secret 1** 和「提取」 Tab 的 **Recovered Secret 1**，完成後自動計算。"
+                    )
+                    btn_calc_secret = gr.Button("🔄 重新計算 Secret 指標", variant="secondary")
+                    secret_metrics_out = gr.Markdown("請先完成「提取」步驟…")
+
+            # 手動重計按鈕：直接引用前面 Tab 已有的元件
+            btn_calc_cover.click(
+                fn=compute_cover_metrics,
+                inputs=[in_cover, out_stego],
+                outputs=[cover_metrics_out],
+            )
+            btn_calc_secret.click(
+                fn=compute_secret_metrics,
+                inputs=[in_secret, out_recovered],
+                outputs=[secret_metrics_out],
+            )
+
+    # ── 藏入和提取完成後自動觸發指標計算（在 Metrics Tab 定義完後才可 binding）──
+    btn_hide.click(
+        fn=hide_audio,
+        inputs=[in_cover, cover_vol, in_secret, secret_vol, in_secret2, num_sec_radio],
+        outputs=[out_stego, out_hide_msg]
+    ).then(
+        fn=compute_cover_metrics,
+        inputs=[in_cover, out_stego],
+        outputs=[cover_metrics_out],
+    )
+    btn_extract.click(
+        fn=extract_audio,
+        inputs=[in_stego, extract_vol, filter_mode, stft_quantile, num_sec_radio],
+        outputs=[out_recovered, out_recovered2, out_extract_msg]
+    ).then(
+        fn=compute_secret_metrics,
+        inputs=[in_secret, out_recovered],
+        outputs=[secret_metrics_out],
+    )
+
     # ── Radio 切換：同步顯示/隱藏 Secret 2 相關元件 ────────────
     num_sec_radio.change(
         fn=_update_secret2_visibility,
@@ -515,4 +706,4 @@ with gr.Blocks(title="InvASNet 隱寫測試平台") as app:
     )
 
 if __name__ == "__main__":
-    app.launch(server_name="127.0.0.1", server_port=7860, share=False)
+    app.launch(server_name="127.0.0.1", server_port=7860, share=True)

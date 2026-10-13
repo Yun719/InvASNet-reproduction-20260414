@@ -39,7 +39,7 @@ weight_step = 1000
 gamma = 0.5
 
 lamda_reconstruction = 5    # 還原秘密的權重。設定為 5 代表我們非常看重「秘密能不能完美拿出來」，這項不准出錯。
-lamda_guide = 0.2             # 偽裝聲音的權重
+lamda_guide = 3             # 偽裝聲音的權重
 lamda_low_frequency = 1     # 低頻約束的權重
 
 # ---- guide loss 類型 ----
@@ -52,7 +52,7 @@ log_spec_n_fft   = 1024    #    log_spec 模式：STFT 每幀 FFT 點數（建�
 log_spec_hop     = 256     #    log_spec 模式：STFT hop length（推薦為 n_fft 的 1/4）
 
 # ---- psychoacoustic perceptual loss ----
-lamda_psy       = 30.0   # ✨ 心理聲學感知損失權重（0.0 = 關閉，不影響原始訓練流程）
+lamda_psy       = 50.0   # ✨ 心理聲學感知損失權重（0.0 = 關閉，不影響原始訓練流程）
                         #    推薦調整範圍：0.5 ~ 2.0
 psy_n_fft       = 4096  #    每幀 FFT 點數（建議 2 的次方；須 <= segment_length=44160）
 psy_alpha       = 0.05  #    遮蔽比例：越小 = 門限越嚴格（推薦 0.05 ~ 0.20）
@@ -68,9 +68,9 @@ MODEL_PATH    = os.path.join(os.getcwd(), "model") + os.sep
 LOSS_LOG_PATH = os.path.join(os.getcwd(), "loss_log.csv")  # ✨ Loss 記錄 CSV 路徑（append 模式，支援中斷再續）
 SAVE_freq = 5
 
-suffix = "model_checkpoint_00010.pt"     # ✨接著做的模型檔名
-tain_next = True      # ✨如果你今天訓練到第 10 個 Epoch 關掉電腦，明天想繼續，就把這個改成 True，它就會去 model 資料夾底下讀取 model.pt 繼續跑。
-trained_epoch = 10      # ✨上次跑到第幾輪 ?（重跑請填 0）
+suffix = "model_checkpoint_00000.pt"     # ✨接著做的模型檔名
+tain_next = False      # ✨如果你今天訓練到第 10 個 Epoch 關掉電腦，明天想繼續，就把這個改成 True，它就會去 model 資料夾底下讀取 model.pt 繼續跑。
+trained_epoch = 0      # ✨上次跑到第幾輪 ?（重跑請填 0）
 
 # ---- dataset paths (audio) ----
 INVASN_DATA_ROOT = "./data"  # 這代表所有的資料都要放在你目前這個程式碼資料夾裡面，一個名為 data 的子資料夾下。
